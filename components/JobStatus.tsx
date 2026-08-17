@@ -23,15 +23,41 @@ const STATUS_BANNER: Partial<Record<JobStatus, { heading: string; sub: string }>
 type Props = {
   status: JobStatus;
   shotCount?: number;
+  shotsAnalyzed?: number;
   errorCount?: number;
   errorMessage?: string;
   fixTimedOut?: boolean;
 };
 
-export default function JobStatus({ status, shotCount, errorCount, errorMessage, fixTimedOut }: Props) {
+export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut }: Props) {
   const currentIndex = ORDER.indexOf(status);
   const isError = status === "error";
   const banner = fixTimedOut ? null : STATUS_BANNER[status];
+
+  // The job page passes `shotCount={job.shotCount || undefined}`, so a real 0
+  // arrives as undefined. Normalise here rather than change the call site.
+  const shotsDetected = shotCount ?? 0;
+
+  // Jobs written before shotsAnalyzed existed have no value for it; for those,
+  // every detected shot was analysed by definition.
+  const shotsUsable = shotsAnalyzed ?? shotsDetected;
+
+  // Some shots lost every keyframe, so the analysis only saw part of the video.
+  // Neither "single continuous shot" nor "clean result" is true here.
+  const partiallyAnalysed = shotsUsable < shotsDetected;
+
+  // A job can carry an errorMessage while its status is NOT "error" — decompose
+  // writes one on a plan rejection and detect then overwrites the status. Show
+  // the message whenever it exists, or the reason stays unread in Firestore.
+  const showRejection = !isError && !!errorMessage;
+
+  // A finished analysis that found nothing rendered as a bare progress rail
+  // with no text at all. Two genuinely different outcomes, two messages.
+  const showEmptyState =
+    !isError &&
+    !errorMessage &&
+    status === "awaiting_confirmation" &&
+    (errorCount ?? 0) === 0;
 
   return (
     <div className="w-full max-w-2xl mx-auto">
@@ -118,6 +144,56 @@ export default function JobStatus({ status, shotCount, errorCount, errorMessage,
               errors found
             </span>
           )}
+        </div>
+      )}
+
+      {showRejection && (
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4">
+          <p className="font-semibold text-sm text-amber-900 mb-1">
+            This video wasn&apos;t analysed
+          </p>
+          <p className="text-sm text-amber-800">{errorMessage}</p>
+        </div>
+      )}
+
+      {showEmptyState && partiallyAnalysed && (
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4">
+          <p className="font-semibold text-sm text-amber-900 mb-1">
+            Analysed {shotsUsable} of {shotsDetected} shots
+          </p>
+          <p className="text-sm text-amber-800">
+            Some frames could not be extracted, so part of this video was not
+            checked. Nothing was found in the {shotsUsable} shot
+            {shotsUsable === 1 ? "" : "s"} that were analysed, but that is not a
+            clean result for the whole clip. Re-uploading often works.
+          </p>
+        </div>
+      )}
+
+      {showEmptyState && !partiallyAnalysed && shotsUsable <= 1 && (
+        <div className="mt-5 rounded-xl border border-gray-200 bg-gray-50 px-5 py-4">
+          <p className="font-semibold text-sm text-black mb-1">
+            Nothing to compare in this clip
+          </p>
+          <p className="text-sm text-gray-600">
+            Scene Fixer finds continuity errors by comparing one shot against
+            another, and this video is a single continuous shot. Upload a clip
+            with at least two or three cuts and it will have something to work
+            with.
+          </p>
+        </div>
+      )}
+
+      {showEmptyState && !partiallyAnalysed && shotsUsable >= 2 && (
+        <div className="mt-5 rounded-xl border border-green-200 bg-green-50 px-5 py-4">
+          <p className="font-semibold text-sm text-green-900 mb-1">
+            No continuity errors found
+          </p>
+          <p className="text-sm text-green-800">
+            The analysis compared all {shotsUsable} shots and found nothing
+            inconsistent between them. This clip is clean — there is nothing to
+            fix.
+          </p>
         </div>
       )}
     </div>

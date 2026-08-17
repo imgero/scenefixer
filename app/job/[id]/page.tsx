@@ -310,6 +310,7 @@ export default function JobPage({ params }: Props) {
         <JobStatus
           status={job.status}
           shotCount={job.shotCount || undefined}
+          shotsAnalyzed={job.shotsAnalyzed}
           errorMessage={job.errorMessage}
           fixTimedOut={fixTimedOut}
           errorCount={

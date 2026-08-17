@@ -22,6 +22,9 @@ export type Job = {
   scoreBefore?: number;
   scoreAfter?: number;
   shotCount: number;
+  /** Shots with usable keyframes. Absent on jobs written before this field
+   *  existed; treat undefined as "equal to shotCount". */
+  shotsAnalyzed?: number;
   errorCount: number;
   fixedCount: number;
   userHint?: string;
