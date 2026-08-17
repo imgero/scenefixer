@@ -82,21 +82,39 @@ def detect_shots(video_path: str) -> list[dict]:
     return shots
 
 
-def extract_keyframe(video_path: str, mid_ms: float, output_path: str) -> str:
-    """Extract a single frame at mid_ms milliseconds."""
+def extract_keyframe(video_path: str, mid_ms: float, output_path: str) -> str | None:
+    """Extract a single frame at mid_ms milliseconds.
+
+    Returns the output path, or None when ffmpeg produced no usable frame.
+
+    check=True alone is not sufficient: when -ss lands at or past the last
+    decodable frame of the input, ffmpeg writes no output file and still
+    exits 0. The caller then tried to upload a file that was never created
+    and got [Errno 2], killing the whole job. Verify the file exists and is
+    non-empty before reporting success.
+    """
     mid_sec = mid_ms / 1000.0
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-ss", str(mid_sec),
-            "-i", video_path,
-            "-frames:v", "1",
-            "-q:v", "2",
-            output_path,
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", str(mid_sec),
+                "-i", video_path,
+                "-frames:v", "1",
+                "-q:v", "2",
+                output_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", "replace")[-300:]
+        print(f"extract_keyframe: ffmpeg exited {exc.returncode} at {mid_sec:.3f}s: {stderr}")
+        return None
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        return None
+
     return output_path
 
 
@@ -175,6 +193,7 @@ def run_decompose(job_id: str) -> int:
         # write Firestore doc with array + mid-frame for backward-compat.
         batch = db.batch()
         shots_ref = job_ref.collection("shots")
+        shots_written = 0
 
         for shot in shots:
             shot_dur_ms = shot["endMs"] - shot["startMs"]
@@ -183,9 +202,25 @@ def run_decompose(job_id: str) -> int:
             for k, offset in enumerate(KEYFRAME_OFFSETS):
                 frame_ms = shot["startMs"] + shot_dur_ms * offset
                 kf_path = os.path.join(tmp, f"keyframe_{shot['index']}_{k}.jpg")
-                extract_keyframe(norm_path, frame_ms, kf_path)
+                # A frame we cannot extract is skipped, not fatal. The 0.90
+                # offset can land past the last decodable frame of a shot;
+                # frames 0.10-0.70 are already uploaded and are enough to
+                # analyse the shot.
+                if extract_keyframe(norm_path, frame_ms, kf_path) is None:
+                    print(
+                        f"Keyframe skipped — shot {shot['index']}, offset {offset} "
+                        f"(k={k}) at {frame_ms / 1000.0:.3f}s: ffmpeg produced no frame"
+                    )
+                    continue
                 storage_path = f"jobs/{job_id}/keyframes/{shot['index']}_{k}.jpg"
                 keyframe_urls.append(upload_keyframe(kf_path, storage_path))
+
+            if not keyframe_urls:
+                print(
+                    f"Shot {shot['index']} skipped — no keyframes could be extracted "
+                    f"across any of the {len(KEYFRAME_OFFSETS)} offsets"
+                )
+                continue
 
             shot_id = f"shot_{shot['index']:04d}"
             doc_ref = shots_ref.document(shot_id)
@@ -196,13 +231,23 @@ def run_decompose(job_id: str) -> int:
                 "keyframeUrl": keyframe_urls[len(keyframe_urls) // 2],
                 "keyframeUrls": keyframe_urls,
             })
+            shots_written += 1
 
         batch.commit()
 
-        # 5. Update job status
+        # 5. Update job status.
+        # Two distinct numbers, deliberately not collapsed into one:
+        #   shotCount     — what scene detection found in the video
+        #   shotsAnalyzed — how many of those have keyframes and can be compared
+        # They diverge when keyframe extraction fails on some shots. Reporting
+        # only shotsAnalyzed would tell a user whose 4-shot video lost two shots
+        # that their clip is a single continuous shot, or hand them a clean
+        # "no errors found" on a half-analysed video — silently, which is the
+        # exact failure class this pass exists to remove.
         job_ref.update({
             "status": "detecting",
             "shotCount": len(shots),
+            "shotsAnalyzed": shots_written,
         })
 
-        return len(shots)
+        return shots_written
