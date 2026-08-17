@@ -28,6 +28,10 @@ export async function triggerFixPhase(jobId: string) {
   return callModal(process.env.MODAL_FIX_PHASE_URL!, { jobId });
 }
 
+// TODO: MODAL_REPROCESS_URL is missing from .env.local, so this posts to
+// `undefined` and throws at the `if (!url)` guard in callModal. Not on the
+// analysis path — out of scope for this pass, needs the deployed reprocess_job
+// URL added to the environment.
 export async function triggerReprocessJob(jobId: string) {
   return callModal(process.env.MODAL_REPROCESS_URL!, { jobId });
 }

@@ -397,6 +397,22 @@ def run_detect(job_id: str) -> int:
 
     if not shots:
         job_ref.update({"status": "awaiting_confirmation", "errorCount": 0})
+
+        # outcome:"empty" keeps this branch distinguishable from a real
+        # analysis that ran and found nothing. This is the branch that used to
+        # mask a decompose rejection, so it must stay separately queryable.
+        from modal_app import analytics
+        analytics.capture(
+            job_id,
+            "job_analysis_completed",
+            {
+                "outcome": "empty",
+                "shot_count": 0,
+                "error_count": 0,
+                "had_zero_shots": True,
+            },
+            job=job_doc,
+        )
         return 0
 
     # 1. Collect all errors — both standalone (per-shot) and pair-wise (cross-shot).
@@ -486,5 +502,25 @@ def run_detect(job_id: str) -> int:
         "errorCount": total_errors,
         "scoreBefore": score,
     })
+
+    from modal_app import analytics
+    analytics.capture(
+        job_id,
+        "job_analysis_completed",
+        {
+            "outcome": "analysed",
+            # Both numbers, so a partial analysis is queryable rather than
+            # silently indistinguishable from a clean full one.
+            "shot_count": job_doc.get("shotCount", len(shots)),
+            "shots_analyzed": len(shots),
+            "partially_analysed": job_doc.get("shotCount", len(shots)) > len(shots),
+            "error_count": total_errors,
+            "score_before": score,
+            "pair_count": len(get_pairs_to_compare(shots)) if len(shots) >= 2 else 0,
+            "raw_before_dedupe": len(raw),
+            "had_zero_shots": False,
+        },
+        job=job_doc,
+    )
 
     return total_errors

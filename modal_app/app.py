@@ -19,6 +19,8 @@ image = (
         "opencv-python-headless>=4.9.0",
         "fastapi>=0.115.0",
         "python-multipart>=0.0.9",
+        # Pinned to 3.x: posthog 4+/6+ changed the capture() signature.
+        "posthog>=3.7,<4",
     )
 )
 
@@ -49,6 +51,7 @@ def _verify_token(credentials: HTTPAuthorizationCredentials = Security(security)
         modal.Secret.from_name("anthropic-api-key"),
         modal.Secret.from_name("modal-bearer-token"),
         modal.Secret.from_name("replicate-api-token"),
+        modal.Secret.from_name("posthog-api-key"),
     ],
     timeout=600,
     min_containers=0,
@@ -59,6 +62,10 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
     job_id = body.get("jobId")
     if not job_id:
         raise HTTPException(status_code=400, detail="jobId required")
+
+    from modal_app import analytics
+
+    analytics.start_timer(job_id)
 
     try:
         from modal_app.decompose import run_decompose
@@ -91,6 +98,18 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
                 "status": "error",
                 "errorMessage": str(e),
             })
+
+        analytics.capture(
+            job_id,
+            "job_analysis_failed",
+            {
+                "failure_reason": str(e),
+                "exception_type": type(e).__name__,
+                "phase": "detect" if current.get("shotCount") else "decompose",
+                "shot_count": current.get("shotCount", 0),
+            },
+            job=current,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -178,6 +178,20 @@ def run_decompose(job_id: str) -> int:
                         f"Upgrade your plan to process longer videos."
                     ),
                 })
+
+                from modal_app import analytics
+                analytics.capture(
+                    job_id,
+                    "job_analysis_rejected",
+                    {
+                        "reason": "video_too_long",
+                        "duration_s": round(duration_s, 2),
+                        "max_minutes": max_minutes,
+                        "max_seconds": int(max_seconds),
+                        "plan": user_plan,
+                    },
+                    job=job,
+                )
                 return 0
         except (ValueError, AttributeError):
             pass
