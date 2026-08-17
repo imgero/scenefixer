@@ -5,6 +5,7 @@ Runs in Modal with FFmpeg + PySceneDetect.
 
 import os
 import hashlib
+import math
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -144,13 +145,18 @@ def run_decompose(job_id: str) -> int:
         )
         try:
             duration_s = float(probe.stdout.strip())
-            if duration_s > max_minutes * 60:
-                minutes = duration_s / 60
+            max_seconds = max_minutes * 60
+            if duration_s > max_seconds:
+                # Format both sides in whole seconds. Rendering a 0.5 min cap
+                # and a 31s clip as "0.5 min" vs "0.5 min" made a real limit
+                # read as a bug. Ceil the actual duration so the two numbers
+                # can never print equal on a strictly-greater comparison.
                 job_ref.update({
                     "status": "error",
                     "errorMessage": (
                         f"Video too long — your {user_plan} plan supports up to "
-                        f"{max_minutes} min, but this video is {minutes:.1f} min. "
+                        f"{int(max_seconds)}s, but this video is "
+                        f"{math.ceil(duration_s)}s. "
                         f"Upgrade your plan to process longer videos."
                     ),
                 })
