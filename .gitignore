@@ -1,0 +1,37 @@
+# deps
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+.next/
+out/
+build/
+
+# env — catch-all first so no variant can ever be committed
+.env*
+.env
+.env.local
+.env.*.local
+
+# Firebase
+.firebase/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel
+
+# build artifacts / local scratch
+tsconfig.tsbuildinfo
+Terminal Saved Output.txt

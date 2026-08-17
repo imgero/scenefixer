@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function jobIsOwned(jobData) {
+      return jobData.ownerUid != null && request.auth != null && request.auth.uid == jobData.ownerUid;
+    }
+    function jobIsPublicOrBeta(jobData) {
+      return jobData.ownerUid == null || jobData.isPublic == true;
+    }
+
+    match /jobs/{jobId} {
+      allow read: if jobIsOwned(resource.data) || jobIsPublicOrBeta(resource.data);
+      allow write: if false;
+
+      match /shots/{shotId} {
+        allow read: if jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data)
+          || jobIsPublicOrBeta(get(/databases/$(database)/documents/jobs/$(jobId)).data);
+        allow write: if false;
+      }
+
+      match /errors/{errorId} {
+        allow read: if jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data)
+          || jobIsPublicOrBeta(get(/databases/$(database)/documents/jobs/$(jobId)).data);
+
+        allow update: if (
+          (
+            jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data)
+            || jobIsPublicOrBeta(get(/databases/$(database)/documents/jobs/$(jobId)).data)
+          ) &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['userConfirmed', 'fixDirection', 'fixMode', 'replaceWith', 'fixStatus'])
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['fixStatus'])
+            || request.resource.data.fixStatus == 'pending'
+          )
+        );
+        allow create, delete: if false;
+      }
+
+      match /verify_errors/{errorId} {
+        allow read: if jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data)
+          || jobIsPublicOrBeta(get(/databases/$(database)/documents/jobs/$(jobId)).data);
+        allow write: if false;
+      }
+    }
+
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null
+        && request.auth.uid == uid
+        && !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['plan', 'fixesUsedThisMonth', 'monthResetAt', 'stripeCustomerId', 'creditsBalance']);
+    }
+
+    match /cache/{cacheId} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "scenefixer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@paralleldrive/cuid2": "^2.2.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "@runwayml/sdk": "^3.21.0",
+    "clsx": "^2.1.1",
+    "firebase": "^11.7.1",
+    "firebase-admin": "^13.4.0",
+    "geist": "^1.7.1",
+    "next": "^15.5.18",
+    "posthog-js": "^1.374.4",
+    "posthog-node": "^5.34.10",
+    "react": "^19.0.0",
+    "react-compare-slider": "^3.1.0",
+    "react-dom": "^19.0.0",
+    "stripe": "^22.1.1",
+    "tailwind-merge": "^3.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.3.2",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
