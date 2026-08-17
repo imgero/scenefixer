@@ -64,7 +64,20 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
         from modal_app.decompose import run_decompose
         from modal_app.detect import run_detect
 
-        run_decompose(job_id)
+        shot_count = run_decompose(job_id)
+
+        # run_decompose signals a terminal rejection (e.g. the video exceeds the
+        # plan length limit) by writing status:"error" + errorMessage and
+        # returning 0, deliberately without raising — raising would change the
+        # failure semantics of every other decompose path. Detect must not run
+        # in that case: it would find zero shots and overwrite the status with
+        # "awaiting_confirmation", discarding the errorMessage the user needs.
+        if shot_count == 0:
+            from modal_app.firebase import get_db
+            current = get_db().collection("jobs").document(job_id).get().to_dict() or {}
+            if current.get("status") == "error":
+                return {"ok": False, "skipped": "decompose_terminal_error"}
+
         run_detect(job_id)
         return {"ok": True}
     except Exception as e:
