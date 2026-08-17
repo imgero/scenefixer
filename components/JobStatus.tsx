@@ -27,9 +27,20 @@ type Props = {
   errorCount?: number;
   errorMessage?: string;
   fixTimedOut?: boolean;
+  /**
+   * Evidence that each phase actually produced its output. A tick must mean
+   * "this ran", never "the job is past this point in the sequence".
+   */
+  evidence?: {
+    uploaded?: boolean;
+    analysed?: boolean;
+    fixStarted?: boolean;
+    stitched?: boolean;
+    output?: boolean;
+  };
 };
 
-export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut }: Props) {
+export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut, evidence }: Props) {
   const currentIndex = ORDER.indexOf(status);
   const isError = status === "error";
   const banner = fixTimedOut ? null : STATUS_BANNER[status];
@@ -45,6 +56,34 @@ export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount
   // Some shots lost every keyframe, so the analysis only saw part of the video.
   // Neither "single continuous shot" nor "clean result" is true here.
   const partiallyAnalysed = shotsUsable < shotsDetected;
+
+  // Each tick is derived from that phase having produced something, not from
+  // the job's position in STEPS. The positional version ticked "Splitting
+  // shots" and "Scanning shots" on a job rejected before transcoding ever
+  // ran — certifying work that did not happen, which is worse than saying
+  // nothing. Falls back to the positional rule only when no evidence is
+  // supplied, so the component still renders sensibly without it.
+  const phaseDone: boolean[] = STEPS.map((step, i) => {
+    if (!evidence) return currentIndex > i;
+    switch (step.status) {
+      case "uploading":
+        return !!evidence.uploaded;
+      case "decomposing":
+        return shotsDetected > 0;
+      case "detecting":
+        return !!evidence.analysed;
+      case "awaiting_confirmation":
+        return !!evidence.fixStarted;
+      case "fixing":
+        return !!evidence.stitched;
+      case "verifying":
+        return !!evidence.output;
+      case "done":
+        return status === "done";
+      default:
+        return false;
+    }
+  });
 
   // A job can carry an errorMessage while its status is NOT "error" — decompose
   // writes one on a plan rejection and detect then overwrites the status. Show
@@ -85,7 +124,7 @@ export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount
           )}
         <div className="flex items-center gap-0">
           {STEPS.map((step, i) => {
-            const done = currentIndex > i;
+            const done = phaseDone[i];
             const active = currentIndex === i;
 
             return (

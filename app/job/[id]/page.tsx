@@ -312,6 +312,15 @@ export default function JobPage({ params }: Props) {
           shotCount={job.shotCount || undefined}
           shotsAnalyzed={job.shotsAnalyzed}
           errorMessage={job.errorMessage}
+          evidence={{
+            uploaded: !!job.inputVideoUrl,
+            // run_detect writes scoreBefore only on the path that actually
+            // analysed shots — not on the zero-shot early return.
+            analysed: job.scoreBefore !== undefined,
+            fixStarted: job.fixingStartedAt !== undefined,
+            stitched: !!job.stitchVideoUrl,
+            output: !!job.outputVideoUrl,
+          }}
           fixTimedOut={fixTimedOut}
           errorCount={
             job.status !== "uploading" && job.status !== "decomposing"
