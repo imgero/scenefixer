@@ -166,21 +166,44 @@ def run_fix_phase(job_id: str):
         # failed and refunds its credits; this loop makes the JOB's terminal
         # state tell the truth about what actually happened.
         attempted = len(errors_snap)
-        succeeded: list[str] = []
-        failed: list[dict] = []
+        # Three distinct outcomes, deliberately not collapsed into "succeeded".
+        # An Aleph call that returns a clip has not necessarily fixed anything —
+        # the verifier decides that — and reporting "succeeded" for a clip that
+        # still shows the error is how a non-fix came to present as a success.
+        verified: list[str] = []      # ran, and the verifier says the error is gone
+        unverified: list[str] = []    # ran, produced output, error still visible
+        failed: list[dict] = []       # threw; no output at all
+        credits_refunded = 0
+
+        def _error_after(error_id: str) -> dict:
+            return (
+                db.collection("jobs").document(job_id)
+                .collection("errors").document(error_id).get().to_dict()
+                or {}
+            )
 
         for err_doc in errors_snap:
             try:
                 fix_single_error(job_id, err_doc.id)
-                succeeded.append(err_doc.id)
+                after = _error_after(err_doc.id)
+                if after.get("verifiedResolved") is True:
+                    verified.append(err_doc.id)
+                else:
+                    unverified.append(err_doc.id)
             except Exception as e:
                 print(f"Fix failed for error {err_doc.id}: {e}")
                 failed.append({"error_id": err_doc.id, "message": str(e)[:300]})
+                after = _error_after(err_doc.id)
+            if after.get("autoRefunded"):
+                try:
+                    credits_refunded += int(after.get("creditsDeducted") or 0)
+                except (TypeError, ValueError):
+                    pass
 
-        # Nothing succeeded — there is no fixed footage to stitch, so stitching
-        # would produce a re-encode of the original and present it as a result.
-        # Fail the job instead.
-        if attempted > 0 and not succeeded:
+        # Nothing ran to completion — there is no fixed footage to stitch, so
+        # stitching would produce a re-encode of the original and present it as
+        # a result. Fail the job instead.
+        if attempted > 0 and not verified and not unverified:
             message = (
                 failed[0]["message"] if failed else "No fixes could be applied."
             )
@@ -188,8 +211,11 @@ def run_fix_phase(job_id: str):
                 "status": "error",
                 "errorMessage": f"No fixes could be applied. {message}",
                 "fixesAttempted": attempted,
-                "fixesSucceeded": 0,
+                "fixesVerified": 0,
+                "fixesUnverified": 0,
                 "fixesFailed": len(failed),
+                "verificationPassed": False,
+                "creditsRefunded": credits_refunded,
             })
             try:
                 from modal_app import analytics
@@ -199,12 +225,13 @@ def run_fix_phase(job_id: str):
                     {
                         "attempted": attempted,
                         "failed": len(failed),
+                        "credits_refunded": credits_refunded,
                         "reasons": [f["message"] for f in failed][:8],
                     },
                 )
             except Exception as exc:
                 print(f"fix_job_failed capture failed: {exc}")
-            return {"ok": False, "attempted": attempted, "succeeded": 0, "failed": len(failed)}
+            return {"ok": False, "attempted": attempted, "verified": 0, "failed": len(failed)}
 
         db.collection("jobs").document(job_id).update({"status": "verifying"})
         restitch(job_id)
@@ -213,37 +240,48 @@ def run_fix_phase(job_id: str):
         from modal_app.post_process import run_post_process
         run_post_process(job_id)
 
-        # "done" only ever means at least one fix was actually applied. A
-        # partial result records how many did not, so the UI and the data can
-        # both tell a clean run from a degraded one.
+        # status stays "done" because a dozen call sites gate re-fix, reprocess,
+        # retry and download on it. What "done" MEANS is carried by
+        # verificationPassed: the pipeline finished, but it did not necessarily
+        # fix anything. verificationPassed is False whenever not one error came
+        # back verified, and the UI shows the unfixed state off that flag rather
+        # than off status.
+        verification_passed = len(verified) > 0
         db.collection("jobs").document(job_id).update({
             "status": "done",
             "fixesAttempted": attempted,
-            "fixesSucceeded": len(succeeded),
+            "fixesVerified": len(verified),
+            "fixesUnverified": len(unverified),
             "fixesFailed": len(failed),
+            "verificationPassed": verification_passed,
+            "creditsRefunded": credits_refunded,
         })
 
-        if failed:
+        if not verification_passed or failed:
             try:
                 from modal_app import analytics
                 analytics.capture(
                     job_id,
-                    "fix_job_partial",
+                    "fix_job_unverified" if not verification_passed else "fix_job_partial",
                     {
                         "attempted": attempted,
-                        "succeeded": len(succeeded),
+                        "verified": len(verified),
+                        "unverified": len(unverified),
                         "failed": len(failed),
+                        "credits_refunded": credits_refunded,
                         "reasons": [f["message"] for f in failed][:8],
                     },
                 )
             except Exception as exc:
-                print(f"fix_job_partial capture failed: {exc}")
+                print(f"fix job outcome capture failed: {exc}")
 
         return {
             "ok": True,
             "attempted": attempted,
-            "succeeded": len(succeeded),
+            "verified": len(verified),
+            "unverified": len(unverified),
             "failed": len(failed),
+            "verificationPassed": verification_passed,
         }
     except Exception as e:
         from modal_app.firebase import get_db

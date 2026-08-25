@@ -322,6 +322,10 @@ export default function JobPage({ params }: Props) {
             output: !!job.outputVideoUrl,
           }}
           fixTimedOut={fixTimedOut}
+          verificationPassed={job.verificationPassed}
+          creditsRefunded={job.creditsRefunded}
+          fixesAttempted={job.fixesAttempted}
+          fixesFailed={job.fixesFailed}
           errorCount={
             job.status !== "uploading" && job.status !== "decomposing"
               ? job.errorCount
@@ -371,9 +375,16 @@ export default function JobPage({ params }: Props) {
 
         const bannerBorder = hasWatermark
           ? "border-amber-200 bg-amber-50"
-          : "border-emerald-200 bg-emerald-50";
+          : job.verificationPassed === false
+            ? "border-amber-200 bg-amber-50"
+            : "border-emerald-200 bg-emerald-50";
         const titleColor = hasWatermark ? "text-amber-900" : "text-emerald-900";
         const subColor = hasWatermark ? "text-amber-700" : "text-emerald-700";
+
+        // A run that verified nothing produced a file, not a fix. The download
+        // stays available — it is harmless to look at — but it must not be
+        // labelled as a fixed video.
+        const unfixed = job.verificationPassed === false;
 
         let upgradeNote: string | null = null;
         if (isLow) upgradeNote = "Upgrade to Starter for 720p watermark-free output.";
@@ -384,7 +395,9 @@ export default function JobPage({ params }: Props) {
             <div className="flex flex-col sm:flex-row sm:items-center gap-3">
               <div className="flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <p className={`font-semibold text-sm ${titleColor}`}>Your fixed video is ready</p>
+                  <p className={`font-semibold text-sm ${unfixed ? "text-amber-900" : titleColor}`}>
+                    {unfixed ? "Result available — not a fix" : "Your fixed video is ready"}
+                  </p>
                   <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
                     quality === "1080p"
                       ? "bg-black text-white"

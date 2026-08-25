@@ -89,10 +89,15 @@ export default function JobsPage() {
       ) : (
         <div className="flex flex-col gap-3">
           {jobs.map((job) => {
-            const meta = STATUS_META[job.status] ?? { label: job.status, color: "text-gray-500 bg-gray-100" };
+            // A finished run that verified nothing is not "Fixed". Explicit
+            // false only — jobs predating the flag keep their old label.
+            const unfixed = job.status === "done" && job.verificationPassed === false;
+            const meta = unfixed
+              ? { label: "Not fixed", color: "text-amber-700 bg-amber-50" }
+              : STATUS_META[job.status] ?? { label: job.status, color: "text-gray-500 bg-gray-100" };
             const rawPath = job.inputVideoUrl?.split("/o/")[1]?.split("?")[0] ?? "";
             const filename = (rawPath ? decodeURIComponent(rawPath).split("/").pop() : null) ?? job.id;
-            const isDone = job.status === "done";
+            const isDone = job.status === "done" && !unfixed;
 
             return (
               <Link
@@ -105,7 +110,9 @@ export default function JobsPage() {
                     ? <CheckCircle size={20} weight="thin" className="text-emerald-500" />
                     : job.status === "error"
                       ? <Warning size={20} weight="thin" className="text-red-400" />
-                      : <Clock size={20} weight="thin" className="text-gray-400" />}
+                      : unfixed
+                        ? <Warning size={20} weight="thin" className="text-amber-500" />
+                        : <Clock size={20} weight="thin" className="text-gray-400" />}
                 </div>
 
                 <div className="flex-1 min-w-0">

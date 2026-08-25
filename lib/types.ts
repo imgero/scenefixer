@@ -28,11 +28,23 @@ export type Job = {
   errorCount: number;
   fixedCount: number;
   /** Per-run fix outcomes. Absent on jobs written before these existed.
-   *  "done" now guarantees fixesSucceeded >= 1; a job where every fix threw
-   *  is written as "error", not "done". */
+   *
+   *  A job where every fix threw is written as "error", not "done". But a fix
+   *  that RAN can still leave the error visible, and that is not a success
+   *  either — so "done" means the pipeline finished, and `verificationPassed`
+   *  says whether it actually fixed anything. Read that flag, not the status,
+   *  before telling a user their video is fixed. */
   fixesAttempted?: number;
-  fixesSucceeded?: number;
+  /** Verifier confirmed the error is gone. */
+  fixesVerified?: number;
+  /** Ran and produced output, but the error is still visible. Credits refunded. */
+  fixesUnverified?: number;
+  /** Threw before producing anything. Credits refunded. */
   fixesFailed?: number;
+  /** False when not one error came back verified. */
+  verificationPassed?: boolean;
+  /** Total credits returned to the owner for this run. */
+  creditsRefunded?: number;
   userHint?: string;
   createdAt: Timestamp;
   fixingStartedAt?: number;

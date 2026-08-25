@@ -27,6 +27,12 @@ type Props = {
   errorCount?: number;
   errorMessage?: string;
   fixTimedOut?: boolean;
+  /** False when a finished run did not verify a single fix. */
+  verificationPassed?: boolean;
+  /** Credits returned to the owner for this run. */
+  creditsRefunded?: number;
+  fixesAttempted?: number;
+  fixesFailed?: number;
   /**
    * Evidence that each phase actually produced its output. A tick must mean
    * "this ran", never "the job is past this point in the sequence".
@@ -40,7 +46,7 @@ type Props = {
   };
 };
 
-export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut, evidence }: Props) {
+export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut, evidence, verificationPassed, creditsRefunded, fixesAttempted, fixesFailed }: Props) {
   const currentIndex = ORDER.indexOf(status);
   const isError = status === "error";
   const banner = fixTimedOut ? null : STATUS_BANNER[status];
@@ -79,11 +85,18 @@ export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount
       case "verifying":
         return !!evidence.output;
       case "done":
-        return status === "done";
+        // Same rule as every other step: the tick means the phase produced its
+        // output. A run that verified nothing did not.
+        return status === "done" && verificationPassed !== false;
       default:
         return false;
     }
   });
+
+  // A finished run that verified nothing is NOT a fix, however "done" the
+  // status says it is. Explicit false only: jobs written before this field
+  // existed leave it undefined and must keep their old presentation.
+  const finishedUnfixed = status === "done" && verificationPassed === false;
 
   // A job can carry an errorMessage while its status is NOT "error" — decompose
   // writes one on a plan rejection and detect then overwrites the status. Show
@@ -183,6 +196,26 @@ export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount
               errors found
             </span>
           )}
+        </div>
+      )}
+
+      {finishedUnfixed && (
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4">
+          <p className="font-semibold text-sm text-amber-900 mb-1">
+            We couldn&apos;t fix this one
+          </p>
+          <p className="text-sm text-amber-800">
+            {fixesFailed && fixesAttempted && fixesFailed >= fixesAttempted
+              ? "The fix couldn't be applied to this clip."
+              : "We regenerated the affected frames, but the inconsistency is still visible, so this isn't a fix."}
+            {creditsRefunded && creditsRefunded > 0
+              ? ` Your ${creditsRefunded} credit${creditsRefunded === 1 ? "" : "s"} ${creditsRefunded === 1 ? "has" : "have"} been returned — you have not been charged.`
+              : " You have not been charged."}
+          </p>
+          <p className="text-sm text-amber-800 mt-2">
+            The result is still available below if you want to look at it, but we
+            are not calling it a fixed video.
+          </p>
         </div>
       )}
 
