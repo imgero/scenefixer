@@ -137,17 +137,18 @@ _MAX_VIDEO_MINUTES: dict[str, float] = {
 }
 
 
-def _fmt_duration(seconds: float) -> str:
+def _fmt_duration(seconds: float, force_seconds: bool = False) -> str:
     """
     Human duration for the length-limit message.
 
-    Under a minute is written in seconds. A 30-second cap rendered as "0.5 min"
-    against a 31-second clip rendered as "1.3 min" reads as a contradiction —
-    two numbers that look unrelated, on the last screen a user sees before
-    deciding whether to pay. Both sides of the comparison go through here so
-    they are always in the same unit.
+    A 30-second cap rendered as "0.5 min" against a 31-second clip rendered as
+    "1.3 min" read as a contradiction — two numbers that look unrelated, on the
+    last screen a user sees before deciding whether to pay. Both sides of the
+    comparison go through here, and `force_seconds` keeps them in the same unit
+    when the cap is under a minute, so a 30-second limit is never compared
+    against a duration expressed in minutes.
     """
-    if seconds < 60:
+    if force_seconds or seconds < 60:
         return f"{int(math.ceil(seconds))} seconds"
     minutes = seconds / 60
     return f"{minutes:.1f} minutes" if minutes % 1 else f"{int(minutes)} minutes"
@@ -190,7 +191,7 @@ def run_decompose(job_id: str) -> int:
                     "errorMessage": (
                         f"Video too long — your {user_plan} plan supports up to "
                         f"{_fmt_duration(max_seconds)}, but this video is "
-                        f"{_fmt_duration(duration_s)}. "
+                        f"{_fmt_duration(duration_s, force_seconds=max_seconds < 60)}. "
                         f"Upgrade your plan to process longer videos."
                     ),
                 })
