@@ -12,3 +12,34 @@ export function getPostHogClient(): PostHog {
   }
   return posthogClient;
 }
+
+type CaptureArgs = Parameters<PostHog["capture"]>[0];
+
+/**
+ * Capture AND flush before resolving.
+ *
+ * `capture()` alone only queues the event; the HTTP POST that actually ships it
+ * is not awaited. On serverless the instance is frozen the moment the route
+ * returns its response, so a queued-but-unsent event is simply lost. That is
+ * why server-side events emitted from route handlers arrive intermittently
+ * while the Modal-emitted analysis events — long-running container, never
+ * frozen — arrive reliably.
+ *
+ * Every server-side capture in a route handler must go through this and be
+ * awaited before the response is returned. Never `capture()` directly here.
+ *
+ * A telemetry failure must never fail the request, so flush errors are
+ * swallowed after logging.
+ */
+export async function captureServer(payload: CaptureArgs): Promise<void> {
+  try {
+    const client = getPostHogClient();
+    client.capture(payload);
+    await client.flush();
+  } catch (err) {
+    console.error(
+      `PostHog captureServer failed for "${payload.event}":`,
+      err instanceof Error ? err.message : err
+    );
+  }
+}

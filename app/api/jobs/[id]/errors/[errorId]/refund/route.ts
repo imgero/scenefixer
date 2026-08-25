@@ -51,14 +51,20 @@ export async function POST(
   // Mark error as refunded
   await errorRef.update({ refunded: true });
 
-  // Return the actual seconds that were deducted for this error
-  if (uid) {
-    const refundCredits = errorData.creditsDeducted ?? 5;
+  // Return the actual seconds that were deducted for this error.
+  // A missing creditsDeducted refunds ZERO, not 5 — absent means nothing was
+  // charged, so nothing is owed. The old `?? 5` minted credits out of a
+  // malformed document every time such an error was refunded.
+  const deducted = errorData.creditsDeducted;
+  const refundCredits =
+    typeof deducted === "number" && deducted > 0 ? deducted : 0;
+
+  if (uid && refundCredits > 0) {
     await adminDb.collection("users").doc(uid).set(
       { creditsBalance: FieldValue.increment(refundCredits) },
       { merge: true }
     );
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, refundCredits });
 }

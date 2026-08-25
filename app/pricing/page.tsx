@@ -15,13 +15,16 @@ const PLANS = [
     name: "Free",
     monthly: 0,
     annual: 0,
-    credits: 5,
-    maxVideo: "5 min",
+    credits: 30,
+    maxVideo: "30 sec",
     quality: "480p",
     watermark: true,
     features: [
       "Unlimited continuity scans",
-      "5 credits / month (~1 fix)",
+      // Stated in fixes, not credits. The old copy claimed 5 credits was
+      // roughly one fix; 5 credits could not cover a single ~10s shot, and it
+      // asked the reader to do arithmetic in an internal unit to find that out.
+      "2 free fixes per month, up to 10 seconds each",
       "480p output + watermark",
       "Up to 30-sec uploads",
       "3 scans / day",
@@ -115,6 +118,35 @@ function PricingContent() {
   const success = searchParams.get("success");
   const cancelled = searchParams.get("cancelled");
   const successCaptured = useRef(false);
+  const [portalLoading, setPortalLoading] = useState(false);
+  const [portalError, setPortalError] = useState<string | null>(null);
+
+  // Self-serve cancellation. Previously there was no path out of a
+  // subscription anywhere in the app; the only customer to subscribe had to be
+  // cancelled from the Stripe dashboard by hand.
+  const openBillingPortal = async () => {
+    if (portalLoading) return;
+    setPortalLoading(true);
+    setPortalError(null);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch("/api/stripe/portal", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.url) {
+        posthog.capture("billing_portal_clicked");
+        window.location.href = data.url;
+        return;
+      }
+      setPortalError(data.error ?? "Could not open billing management.");
+    } catch {
+      setPortalError("Could not open billing management.");
+    } finally {
+      setPortalLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (success && !successCaptured.current) {
@@ -214,6 +246,9 @@ function PricingContent() {
           </p>
           <p className="text-sm text-gray-400">
             <span className="text-black font-semibold">1 credit = 1 second</span> of fixed output · Max 8 fixes per upload · Refund if a fix doesn&apos;t land
+          </p>
+          <p className="text-sm text-gray-500 mt-1">
+            Free accounts need a verified email address before the first fix.
           </p>
 
           <div className="mt-8 inline-flex items-center gap-3 rounded-full border border-gray-200 bg-gray-50 p-1">
@@ -341,8 +376,23 @@ function PricingContent() {
           Fixes run as a background job — you can close your browser while it processes and check back in My fixed videos.
         </p>
 
+        {user && (
+          <div className="mt-8 text-center">
+            <button
+              onClick={openBillingPortal}
+              disabled={portalLoading}
+              className="text-sm text-gray-600 underline underline-offset-2 hover:text-black transition-colors disabled:opacity-50"
+            >
+              {portalLoading ? "Opening…" : "Manage or cancel your subscription"}
+            </button>
+            {portalError && (
+              <p className="mt-2 text-xs text-amber-700">{portalError}</p>
+            )}
+          </div>
+        )}
+
         <p className="mt-4 text-center text-xs text-gray-400">
-          Prices in USD. Subscriptions cancel anytime. Monthly credits reset on the 1st.
+          Prices in USD. Cancel anytime from Manage subscription above. Monthly credits reset on the 1st.
         </p>
 
         <div className="mt-8 text-center space-y-2">

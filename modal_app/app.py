@@ -113,25 +113,37 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.function(
-    image=image,
+FIX_SECRETS = [
+    modal.Secret.from_name("firebase-admin-key"),
+    modal.Secret.from_name("anthropic-api-key"),
+    modal.Secret.from_name("runway-api-key"),
+    modal.Secret.from_name("modal-bearer-token"),
+    # Without this the fix_completed cost event silently no-ops —
+    # analytics._get_client() returns None when POSTHOG_API_KEY is absent.
+    modal.Secret.from_name("posthog-api-key"),
+]
 
-    secrets=[
-        modal.Secret.from_name("firebase-admin-key"),
-        modal.Secret.from_name("anthropic-api-key"),
-        modal.Secret.from_name("runway-api-key"),
-        modal.Secret.from_name("modal-bearer-token"),
-    ],
-    timeout=1800,
-    min_containers=0,
-)
-@modal.fastapi_endpoint(method="POST")
-async def fix_phase(body: dict, _: None = Depends(_verify_token)):
-    """Fix → Stitch → Verify. Called by /api/jobs/[id]/fix."""
-    job_id = body.get("jobId")
-    if not job_id:
-        raise HTTPException(status_code=400, detail="jobId required")
 
+# 7200s, not 1800s. run_fix_phase processes up to MAX_ERRORS_PER_FIX (8)
+# errors sequentially and an aleph2 generation runs into the minutes, so the
+# old 30-minute ceiling could kill a multi-error job partway — after its
+# Runway credits had already been charged.
+@app.function(image=image, secrets=FIX_SECRETS, timeout=7200, min_containers=0)
+def run_fix_phase(job_id: str):
+    """
+    The actual fix work. A plain function, not a web endpoint, so it can be
+    spawned detached and survive its caller going away.
+
+    This split exists because the whole fix used to run inline inside the web
+    endpoint, and that could never complete in production. The chain was:
+    Vercel route -> after() -> fetch(fix_phase) -> Modal runs the fix inline.
+    Modal returns a 303 once a web endpoint passes ~150s, and Vercel kills
+    after() at its 300s function limit. When that connection dropped, Modal
+    cancelled the in-flight function. An aleph2 generation takes 5-8 minutes,
+    so every fix was guaranteed to be killed part-way — after the Runway
+    credits had already been charged, leaving the job stuck in "fixing" with
+    no output and no error.
+    """
     try:
         from modal_app.firebase import get_db
         from modal_app.fix import fix_single_error
@@ -147,11 +159,52 @@ async def fix_phase(body: dict, _: None = Depends(_verify_token)):
             .get()
         )
 
+        # Per-error outcomes are tracked, not swallowed. A thrown fix used to be
+        # printed and forgotten: the loop carried on, the job was marked "done",
+        # the credits stayed spent, and the user was handed an "output" that was
+        # just their original video re-encoded. fix_single_error marks the error
+        # failed and refunds its credits; this loop makes the JOB's terminal
+        # state tell the truth about what actually happened.
+        attempted = len(errors_snap)
+        succeeded: list[str] = []
+        failed: list[dict] = []
+
         for err_doc in errors_snap:
             try:
                 fix_single_error(job_id, err_doc.id)
+                succeeded.append(err_doc.id)
             except Exception as e:
                 print(f"Fix failed for error {err_doc.id}: {e}")
+                failed.append({"error_id": err_doc.id, "message": str(e)[:300]})
+
+        # Nothing succeeded — there is no fixed footage to stitch, so stitching
+        # would produce a re-encode of the original and present it as a result.
+        # Fail the job instead.
+        if attempted > 0 and not succeeded:
+            message = (
+                failed[0]["message"] if failed else "No fixes could be applied."
+            )
+            db.collection("jobs").document(job_id).update({
+                "status": "error",
+                "errorMessage": f"No fixes could be applied. {message}",
+                "fixesAttempted": attempted,
+                "fixesSucceeded": 0,
+                "fixesFailed": len(failed),
+            })
+            try:
+                from modal_app import analytics
+                analytics.capture(
+                    job_id,
+                    "fix_job_failed",
+                    {
+                        "attempted": attempted,
+                        "failed": len(failed),
+                        "reasons": [f["message"] for f in failed][:8],
+                    },
+                )
+            except Exception as exc:
+                print(f"fix_job_failed capture failed: {exc}")
+            return {"ok": False, "attempted": attempted, "succeeded": 0, "failed": len(failed)}
 
         db.collection("jobs").document(job_id).update({"status": "verifying"})
         restitch(job_id)
@@ -160,9 +213,38 @@ async def fix_phase(body: dict, _: None = Depends(_verify_token)):
         from modal_app.post_process import run_post_process
         run_post_process(job_id)
 
-        db.collection("jobs").document(job_id).update({"status": "done"})
+        # "done" only ever means at least one fix was actually applied. A
+        # partial result records how many did not, so the UI and the data can
+        # both tell a clean run from a degraded one.
+        db.collection("jobs").document(job_id).update({
+            "status": "done",
+            "fixesAttempted": attempted,
+            "fixesSucceeded": len(succeeded),
+            "fixesFailed": len(failed),
+        })
 
-        return {"ok": True}
+        if failed:
+            try:
+                from modal_app import analytics
+                analytics.capture(
+                    job_id,
+                    "fix_job_partial",
+                    {
+                        "attempted": attempted,
+                        "succeeded": len(succeeded),
+                        "failed": len(failed),
+                        "reasons": [f["message"] for f in failed][:8],
+                    },
+                )
+            except Exception as exc:
+                print(f"fix_job_partial capture failed: {exc}")
+
+        return {
+            "ok": True,
+            "attempted": attempted,
+            "succeeded": len(succeeded),
+            "failed": len(failed),
+        }
     except Exception as e:
         from modal_app.firebase import get_db
         current = get_db().collection("jobs").document(job_id).get().to_dict() or {}
@@ -171,7 +253,25 @@ async def fix_phase(body: dict, _: None = Depends(_verify_token)):
                 "status": "error",
                 "errorMessage": str(e),
             })
-        raise HTTPException(status_code=500, detail=str(e))
+        raise
+
+
+@app.function(image=image, secrets=FIX_SECRETS, timeout=60, min_containers=0)
+@modal.fastapi_endpoint(method="POST")
+async def fix_phase(body: dict, _: None = Depends(_verify_token)):
+    """
+    Accept a fix request and hand it to a detached worker.
+
+    Returns immediately. The caller (/api/jobs/[id]/fix, via after()) only needs
+    to know the work was accepted — it must NOT hold a connection open for the
+    duration, because that connection dying is what cancels the work.
+    """
+    job_id = body.get("jobId")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="jobId required")
+
+    call = run_fix_phase.spawn(job_id)
+    return {"ok": True, "spawned": True, "callId": call.object_id}
 
 
 @app.function(

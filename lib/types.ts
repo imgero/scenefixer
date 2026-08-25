@@ -27,6 +27,12 @@ export type Job = {
   shotsAnalyzed?: number;
   errorCount: number;
   fixedCount: number;
+  /** Per-run fix outcomes. Absent on jobs written before these existed.
+   *  "done" now guarantees fixesSucceeded >= 1; a job where every fix threw
+   *  is written as "error", not "done". */
+  fixesAttempted?: number;
+  fixesSucceeded?: number;
+  fixesFailed?: number;
   userHint?: string;
   createdAt: Timestamp;
   fixingStartedAt?: number;
@@ -113,7 +119,14 @@ export const PLAN_LIMITS: Record<Plan, {
   qualityLabel: string;
   watermark: boolean;
 }> = {
-  free:    { creditsPerMonth: 5,   maxVideoMinutes: 0.5, qualityLabel: "480p",  watermark: true  },
+  // 30 = two complete 10-second fixes with headroom. At 5 credits a single
+  // ~10s shot cost 11 and no free user could ever finish one fix.
+  free:    { creditsPerMonth: 30,  maxVideoMinutes: 0.5, qualityLabel: "480p",  watermark: true  },
+  // NOTE: free (30) now exceeds starter (20). Deliberate for this deploy —
+  // paid grants are frozen until ~20 real fixes give a measured cost-per-fix
+  // to reprice from. Starter still differentiates on 720p, no watermark and
+  // 5-minute uploads, but the headline credit number is inverted and should
+  // not survive the reprice.
   starter: { creditsPerMonth: 20,  maxVideoMinutes: 5,  qualityLabel: "720p",  watermark: false },
   pro:     { creditsPerMonth: 45,  maxVideoMinutes: 15, qualityLabel: "1080p", watermark: false },
   studio:  { creditsPerMonth: 120, maxVideoMinutes: 60, qualityLabel: "1080p", watermark: false },

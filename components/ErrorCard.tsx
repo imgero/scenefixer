@@ -90,6 +90,24 @@ export default function ErrorCard({
 }: Props) {
   const errorRef = doc(db, "jobs", jobId, "errors", error.id);
 
+  // Client capture proves the click; the server receipt proves the Firestore
+  // write actually landed. Both are emitted, under different names, because a
+  // click that never persisted is exactly the case we could not previously see.
+  const recordConfirm = async (fixMode: string) => {
+    posthog.capture("error_confirm_clicked", {
+      job_id: jobId, error_id: error.id, error_type: error.type,
+      severity: error.severity, fix_mode: fixMode,
+    });
+    try {
+      await fetch(`/api/jobs/${jobId}/errors/${error.id}/confirm`, {
+        method: "POST",
+        headers: await getAuthHeaders(),
+      });
+    } catch {
+      // Telemetry only — never block or fail the confirm on this.
+    }
+  };
+
   const [replaceMode, setReplaceMode] = useState(false);
   const [replaceDraft, setReplaceDraft] = useState(error.replaceWith ?? "");
   const isWholeclipType = error.type === "lighting" || error.type === "atmosphere";
@@ -140,21 +158,21 @@ export default function ErrorCard({
     if (isFixing) return;
     setReplaceMode(false);
     await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "remove", replaceWith: "" }));
-    posthog.capture("error_confirmed", { job_id: jobId, error_id: error.id, error_type: error.type, severity: error.severity, fix_mode: "remove" });
+    await recordConfirm("remove");
   };
 
   const pickWholeclip = async () => {
     if (isFixing) return;
     const prompt = (error.fixSuggestion || error.description || "Fix the visual inconsistency").trim();
     await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: prompt }));
-    posthog.capture("error_confirmed", { job_id: jobId, error_id: error.id, error_type: error.type, severity: error.severity, fix_mode: "wholeclip" });
+    await recordConfirm("wholeclip");
   };
 
   const pickRestore = async () => {
     if (isFixing) return;
     const suggestion = (error.fixSuggestion || error.description || "").trim();
     await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: suggestion }));
-    posthog.capture("error_confirmed", { job_id: jobId, error_id: error.id, error_type: error.type, severity: error.severity, fix_mode: "restore" });
+    await recordConfirm("restore");
   };
 
   const pickAdd = () => {
@@ -176,7 +194,7 @@ export default function ErrorCard({
       fixMode: "remove",
       fixDirection: flippedDirection,
     }));
-    posthog.capture("error_confirmed", { job_id: jobId, error_id: error.id, error_type: error.type, severity: error.severity, fix_mode: "remove_from_source" });
+    await recordConfirm("remove_from_source");
   };
 
   const pickReplace = async () => {
@@ -185,7 +203,7 @@ export default function ErrorCard({
     if (!value) return;
     setReplaceMode(false);
     await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: value }));
-    posthog.capture("error_confirmed", { job_id: jobId, error_id: error.id, error_type: error.type, severity: error.severity, fix_mode: "replace" });
+    await recordConfirm("replace");
   };
 
   const reset = async () => {

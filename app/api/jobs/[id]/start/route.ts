@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb, adminAuth } from "@/lib/firebase-admin";
 import { triggerProcessJob } from "@/lib/modal";
 import { getPostHogClient } from "@/lib/posthog-server";
-import type { Plan } from "@/lib/types";
+import { ensureEntitlement } from "@/lib/entitlements";
 
 const FREE_SCANS_PER_DAY = 3;
 
@@ -46,13 +46,22 @@ export async function POST(
       return NextResponse.json({ error: "inputVideoUrl required" }, { status: 400 });
     }
 
-    // Rate-limit free-tier authenticated users to 3 scans/day
+    // Rate-limit free-tier authenticated users to 3 scans/day.
     if (uid) {
-      const userSnap = await adminDb.collection("users").doc(uid).get();
-      const userData = userSnap.exists ? userSnap.data()! : {};
-      const plan = (userData.plan as Plan) ?? "free";
-      if (plan === "free") {
+      // Ensure the full entitlement shape FIRST. This route used to create the
+      // user document with a merge-write of only { scanDate, scansToday },
+      // leaving every account it touched without plan / monthResetAt / credit
+      // fields — the defect behind the "paid but treated as free" incident.
+      const userRecord = await adminAuth.getUser(uid).catch(() => null);
+      const ent = await ensureEntitlement(uid, {
+        email: userRecord?.email ?? null,
+        emailVerified: userRecord?.emailVerified ?? false,
+      });
+
+      if (ent.plan === "free") {
         const today = new Date().toISOString().slice(0, 10);
+        const userSnap = await adminDb.collection("users").doc(uid).get();
+        const userData = userSnap.exists ? userSnap.data()! : {};
         const scanDate = userData.scanDate ?? "";
         const scansToday = scanDate === today ? (userData.scansToday ?? 0) : 0;
         if (scansToday >= FREE_SCANS_PER_DAY) {

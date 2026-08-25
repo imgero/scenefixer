@@ -1,9 +1,9 @@
 """
-Phase 5 — Fix confirmed errors using Runway gen4_aleph.
+Phase 5 — Fix confirmed errors using Runway aleph2.
 Flow per error:
   1. Extract shot clip (no audio, 1280×720, ≤5s)
   2. Upload clip to Firebase Storage (public URL for Runway to fetch)
-  3. Submit to Runway gen4_aleph with inpainting prompt
+  3. Submit to Runway aleph2 with inpainting prompt
   4. Poll until SUCCEEDED
   5. Download Runway output, verify with Opus 4.7, re-upload to Firebase
 """
@@ -22,11 +22,15 @@ import requests
 from modal_app.firebase import get_db, get_bucket
 from modal_app.prompts import build_aleph_prompt
 
-MAX_CLIP_DURATION = 28.0  # Aleph now supports up to 30s; 28s gives a small safety margin
-MIN_CLIP_DURATION = 1.1  # Aleph rejects clips < 1s; pad a bit for safety
+MAX_CLIP_DURATION = 28.0  # aleph2 accepts up to 30s; 28s gives a small safety margin
+MIN_CLIP_DURATION = 1.1  # Runway rejects clips < 1s; pad a bit for safety
 TARGET_W, TARGET_H = 1280, 720
 RUNWAY_BASE = "https://api.dev.runwayml.com"
 RUNWAY_VERSION = "2024-11-06"
+# gen4_aleph reached its sunset date on 2026-07-30 and now 400s on every
+# request. aleph2 is its replacement for /v1/video_to_video.
+RUNWAY_MODEL = "aleph2"
+RUNWAY_PROMPT_MAX = 1000  # aleph2 promptText maxLength
 
 
 def _public_url(bucket_name: str, storage_path: str) -> str:
@@ -76,19 +80,110 @@ def extract_clip(video_path: str, start_ms: float, end_ms: float, out_path: str)
     return out_path
 
 
+def refund_error_credits(db, job_id: str, error_id: str, error: dict, reason: str) -> int:
+    """
+    Return an error's credits to its owner. Idempotent; returns the amount refunded.
+
+    A missing `creditsDeducted` refunds ZERO. It used to default to 5, which
+    meant a malformed error document minted five credits out of nothing every
+    time it was refunded. Absent is not "probably five" — it means nothing was
+    charged, so nothing is owed.
+    """
+    if error.get("autoRefunded"):
+        return 0
+
+    secs = error.get("creditsDeducted")
+    secs = int(secs) if isinstance(secs, (int, float)) and secs > 0 else 0
+    if secs <= 0:
+        return 0
+
+    job = db.collection("jobs").document(job_id).get().to_dict() or {}
+    owner_uid = job.get("ownerUid")
+    if not owner_uid:
+        return 0  # beta/anonymous job — no account to credit
+
+    from google.cloud.firestore_v1 import Increment
+    db.collection("users").document(owner_uid).update({"creditsBalance": Increment(secs)})
+    db.collection("jobs").document(job_id).collection("errors").document(error_id).update(
+        {"autoRefunded": True, "refundReason": reason}
+    )
+    print(f"Refunded {secs} credits to {owner_uid} for error {error_id} ({reason})")
+    return secs
+
+
+def _cost_credits(task_data: dict) -> float | None:
+    """
+    Credits charged, from a terminal task payload.
+
+    Runway returns `cost` as an object — {"credits": 280} — not a scalar. Read
+    it defensively: a scalar is accepted too, so a future shape change degrades
+    to None rather than throwing inside a fix that already succeeded and was
+    already paid for.
+    """
+    cost = task_data.get("cost")
+    if isinstance(cost, dict):
+        cost = cost.get("credits")
+    if isinstance(cost, (int, float)):
+        return float(cost)
+    return None
+
+
+def runway_credit_balance() -> int | None:
+    """
+    Current Runway org credit balance, or None if it cannot be read.
+
+    Sampled after each completed fix so spend-down is visible over time without
+    anyone having to open the Runway dashboard. Best-effort by design: this must
+    never be able to fail a fix that already succeeded.
+    """
+    try:
+        resp = requests.get(
+            f"{RUNWAY_BASE}/v1/organization",
+            headers={
+                "Authorization": f"Bearer {os.environ['RUNWAYML_API_SECRET']}",
+                "X-Runway-Version": RUNWAY_VERSION,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("creditBalance")
+    except Exception as exc:
+        print(f"runway_credit_balance failed: {exc}")
+        return None
+
+
 def apply_runway_fix(
     clip_public_url: str,
     prompt: str,
     marker_url: str | None = None,
     fallback_prompt: str | None = None,
-) -> str:
+) -> dict:
     """
-    Submit clip to Runway gen4_aleph. Returns the Runway output video URL.
+    Submit clip to Runway aleph2. Returns {"url", "cost", "task_id"}.
 
-    If marker_url is provided, attached as a `references` image so Aleph
-    gets visual guidance. If Runway rejects the references payload (400),
-    automatically retries with `fallback_prompt` and no references — so a
-    malformed reference never kills the whole fix.
+    `cost` is the credits Runway actually charged for this generation, read off
+    the SUCCEEDED task. It is the real number, not an estimate derived from
+    clip duration, and it is what the pricing model should be rebuilt from.
+
+    Migrated from gen4_aleph, which reached its sunset date on 2026-07-30 and
+    returns 400 for every request. The request shape is NOT a drop-in — checked
+    against the live OpenAPI spec (docs.dev.runwayml.com/openapi.json):
+
+      * `ratio` is deprecated on aleph2 and is no longer sent. Output geometry
+        follows the input clip, which extract_clip already normalises to
+        1280x720/24fps.
+      * `references` does not exist on aleph2. The nearest equivalent is
+        `keyframes` — a timed guidance image anchored at a timestamp. Only the
+        wholeclip (lighting/atmosphere) path ever passed an image here, and it
+        passes a clean unannotated keyframe, so anchoring it at t=0 is safe.
+        The in-video red box is burned into the clip itself and is unaffected.
+      * `range` is deliberately omitted: it restricts the edit to a time
+        window, which for a whole-clip regrade is the opposite of intended.
+      * videoUri must be <= 30s, which MAX_CLIP_DURATION already guarantees.
+
+    If Runway rejects the keyframes payload (400), automatically retries with
+    `fallback_prompt` and no keyframes — so malformed guidance never kills the
+    whole fix.
 
     Uses requests (not httpx/SDK) to avoid SSL issues in Modal.
     Polls up to 12 minutes.
@@ -101,16 +196,15 @@ def apply_runway_fix(
     }
 
     base_payload: dict = {
-        "model": "gen4_aleph",
-        "promptText": prompt,
+        "model": RUNWAY_MODEL,
+        "promptText": prompt[:RUNWAY_PROMPT_MAX],
         "videoUri": clip_public_url,
-        "ratio": f"{TARGET_W}:{TARGET_H}",
     }
 
     if marker_url:
         payload = {
             **base_payload,
-            "references": [{"type": "image", "uri": marker_url}],
+            "keyframes": [{"uri": marker_url, "seconds": 0}],
         }
     else:
         payload = base_payload
@@ -140,10 +234,14 @@ def apply_runway_fix(
         raise RuntimeError(
             f"Runway submit failed ({resp.status_code}): {resp.text[:500]}"
         )
-    task_id = resp.json()["id"]
-    print(f"Runway task submitted: {task_id}")
+    submitted = resp.json()
+    task_id = submitted["id"]
+    est = submitted.get("estimatedCost")
+    if isinstance(est, dict):
+        est = est.get("credits")
+    print(f"Runway task submitted: {task_id} (estimatedCost={est} credits)")
 
-    for attempt in range(72):  # 72 × 10s = 12 minutes max
+    for attempt in range(120):  # 120 × 10s = 20 minutes max
         time.sleep(10)
         poll = requests.get(
             f"{RUNWAY_BASE}/v1/tasks/{task_id}",
@@ -158,12 +256,15 @@ def apply_runway_fix(
             outputs = data.get("output", [])
             if not outputs:
                 raise RuntimeError("Runway SUCCEEDED but returned no output URLs")
-            return outputs[0]
+            # `cost` is only present on terminal tasks and is the actual charge.
+            cost = _cost_credits(data)
+            print(f"Runway task {task_id} SUCCEEDED: cost={cost} credits")
+            return {"url": outputs[0], "cost": cost, "task_id": task_id}
         if status in ("FAILED", "CANCELLED"):
             failure = data.get("failure") or data.get("failureCode") or ""
             raise RuntimeError(f"Runway task {task_id} {status}: {failure}")
 
-    raise RuntimeError(f"Runway task {task_id} timed out after 12 minutes")
+    raise RuntimeError(f"Runway task {task_id} timed out after 20 minutes")
 
 
 def _encode_jpeg(frame) -> str:
@@ -516,11 +617,11 @@ def _fix_long_shot_chunked(
     bucket,
     tmp: str,
     reference_url: str | None = None,
-) -> str:
+) -> tuple[str, float | None]:
     """
     Fix a shot longer than MAX_CLIP_DURATION by splitting into ≤5s chunks,
-    running each through Runway gen4_aleph, then concatenating the results.
-    Returns the local path to the final concatenated fixed clip.
+    running each through Runway aleph2, then concatenating the results.
+    Returns (local path to the final concatenated fixed clip, total credits charged).
     """
     shot_start_ms = fix_shot["startMs"]
     shot_end_ms = fix_shot["endMs"]
@@ -532,6 +633,8 @@ def _fix_long_shot_chunked(
     print(f"  Chunking {shot_dur:.1f}s shot into {n_chunks} × {chunk_dur_ms/1000:.1f}s chunks")
 
     fixed_chunk_paths: list[str] = []
+    total_cost = 0.0
+    cost_known = True
 
     for i in range(n_chunks):
         chunk_start_ms = shot_start_ms + i * chunk_dur_ms
@@ -554,7 +657,12 @@ def _fix_long_shot_chunked(
         chunk_public_url = _public_url(bucket.name, chunk_storage)
 
         print(f"  Chunk {i+1}/{n_chunks}: sending to Runway…")
-        runway_url = apply_runway_fix(chunk_public_url, prompt, marker_url=reference_url)
+        rw = apply_runway_fix(chunk_public_url, prompt, marker_url=reference_url)
+        runway_url = rw["url"]
+        if rw.get("cost") is None:
+            cost_known = False
+        else:
+            total_cost += float(rw["cost"])
 
         r = requests.get(runway_url, timeout=180, stream=True)
         r.raise_for_status()
@@ -580,12 +688,17 @@ def _fix_long_shot_chunked(
             f"Chunk concat failed:\n{result.stderr.decode(errors='replace')[-1000:]}"
         )
 
-    print(f"  Chunked fix done: {len(fixed_chunk_paths)} chunks → {final_path}")
-    return final_path
+    print(
+        f"  Chunked fix done: {len(fixed_chunk_paths)} chunks → {final_path} "
+        f"(total cost={total_cost if cost_known else 'unknown'} credits)"
+    )
+    # None rather than a partial sum: a half-known total silently understates
+    # cost, and the pricing model is going to be rebuilt from these numbers.
+    return final_path, (total_cost if cost_known else None)
 
 
 def fix_single_error(job_id: str, error_id: str) -> None:
-    """Fix one confirmed error using Runway gen4_aleph. Updates error.fixStatus in Firestore."""
+    """Fix one confirmed error using Runway aleph2. Updates error.fixStatus in Firestore."""
     db = get_db()
     error_ref = (
         db.collection("jobs").document(job_id)
@@ -802,9 +915,12 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             shot_dur = (fix_shot["endMs"] - fix_shot["startMs"]) / 1000.0
             fixed_local = os.path.join(tmp, f"clip_{error_id}_fixed.mp4")
 
+            runway_cost: float | None = None
+            runway_task_id: str | None = None
+
             if shot_dur > MAX_CLIP_DURATION:
                 # Long shot: chunk into ≤5s segments, fix each, concatenate
-                chunked_path = _fix_long_shot_chunked(
+                chunked_path, runway_cost = _fix_long_shot_chunked(
                     job_id=job_id,
                     error_id=error_id,
                     fix_shot=fix_shot,
@@ -820,12 +936,15 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                 shutil.copy2(chunked_path, fixed_local)
             else:
                 # Short shot (≤5s): single Runway call
-                runway_url = apply_runway_fix(
+                result = apply_runway_fix(
                     clip_public_url,
                     prompt,
                     marker_url=marker_url,
                     fallback_prompt=fallback_prompt,
                 )
+                runway_url = result["url"]
+                runway_cost = result.get("cost")
+                runway_task_id = result.get("task_id")
                 r2 = requests.get(runway_url, timeout=180, stream=True)
                 r2.raise_for_status()
                 with open(fixed_local, "wb") as f:
@@ -850,6 +969,15 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             "alephPrompt": prompt,
             "verifyResult": verify_result,
             "verifiedResolved": verified_resolved,
+            # Real Runway spend for this fix, straight off the SUCCEEDED task.
+            # Recorded per error so cost-per-fix can be rebuilt from Firestore
+            # even if telemetry is lost, and so credits charged to the user can
+            # be reconciled against credits actually burned.
+            "runwayModel": RUNWAY_MODEL,
+            "runwayCreditsCharged": runway_cost,
+            "runwayTaskId": runway_task_id,
+            "shotDurationSeconds": round(shot_dur, 3),
+            "creditsChargedToUser": error.get("creditsDeducted"),
         }
         if marker_url:
             update_data["markerUrl"] = marker_url
@@ -862,17 +990,46 @@ def fix_single_error(job_id: str, error_id: str) -> None:
         from google.cloud.firestore_v1 import Increment
         db.collection("jobs").document(job_id).update({"fixedCount": Increment(1)})
 
+        # Real unit economics, one event per completed fix. After ~20 of these
+        # the cost-per-fix distribution is measured rather than modelled, which
+        # is the input the paid tiers get repriced from.
+        try:
+            from modal_app import analytics
+            analytics.capture(
+                job_id,
+                "fix_completed",
+                {
+                    "error_id": error_id,
+                    "error_type": error.get("type"),
+                    "runway_model": RUNWAY_MODEL,
+                    "runway_credits_charged": runway_cost,
+                    "runway_task_id": runway_task_id,
+                    "shot_duration_seconds": round(shot_dur, 3),
+                    "credits_charged_to_user": error.get("creditsDeducted"),
+                    "runway_balance_after": runway_credit_balance(),
+                    "was_chunked": shot_dur > MAX_CLIP_DURATION,
+                    "verified_resolved": verified_resolved,
+                    "retry_count": error.get("retryCount", 0),
+                    # Runway credits per second of output actually delivered.
+                    "credits_per_second": (
+                        round(float(runway_cost) / shot_dur, 3)
+                        if runway_cost is not None and shot_dur > 0
+                        else None
+                    ),
+                },
+                job=job,
+            )
+        except Exception as exc:  # telemetry must never fail a completed fix
+            print(f"fix_completed capture failed: {exc}")
+
         # Auto-refund credits if verification failed on the original fix (not a
         # retry — retries are free so there's nothing to refund).
         if error_still_visible and error.get("retryCount", 0) == 0:
-            owner_uid = job.get("ownerUid")
-            if owner_uid:
-                refund_secs = error.get("creditsDeducted", 5)
-                db.collection("users").document(owner_uid).update({
-                    "creditsBalance": Increment(refund_secs),
-                })
+            refunded = refund_error_credits(
+                db, job_id, error_id, error, "verification_failed"
+            )
+            if refunded > 0:
                 update_data["autoRefunded"] = True
-                error_ref.update({"autoRefunded": True})
 
     except Exception as e:
         import traceback
@@ -883,4 +1040,31 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             "errorMessage": str(e),
             "errorDetail": full[-1000:],
         })
+
+        # A fix that threw delivered nothing, so its credits go back. Previously
+        # only a FAILED VERIFICATION refunded; an exception kept the credits and
+        # the job still reported success. That is the 12 August shape exactly:
+        # fixStatus "failed", a Runway sunset error, creditsDeducted 2,
+        # autoRefunded false, job status "done".
+        try:
+            refund_error_credits(db, job_id, error_id, error, "fix_threw")
+        except Exception as refund_err:
+            print(f"Refund after failure also failed for {error_id}: {refund_err}")
+
+        try:
+            from modal_app import analytics
+            analytics.capture(
+                job_id,
+                "fix_error_failed",
+                {
+                    "error_id": error_id,
+                    "error_type": error.get("type"),
+                    "error_message": str(e)[:300],
+                    "runway_model": RUNWAY_MODEL,
+                    "retry_count": error.get("retryCount", 0),
+                },
+            )
+        except Exception as exc:
+            print(f"fix_error_failed capture failed: {exc}")
+
         raise
