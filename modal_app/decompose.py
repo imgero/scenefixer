@@ -137,6 +137,22 @@ _MAX_VIDEO_MINUTES: dict[str, float] = {
 }
 
 
+def _fmt_duration(seconds: float) -> str:
+    """
+    Human duration for the length-limit message.
+
+    Under a minute is written in seconds. A 30-second cap rendered as "0.5 min"
+    against a 31-second clip rendered as "1.3 min" reads as a contradiction —
+    two numbers that look unrelated, on the last screen a user sees before
+    deciding whether to pay. Both sides of the comparison go through here so
+    they are always in the same unit.
+    """
+    if seconds < 60:
+        return f"{int(math.ceil(seconds))} seconds"
+    minutes = seconds / 60
+    return f"{minutes:.1f} minutes" if minutes % 1 else f"{int(minutes)} minutes"
+
+
 def run_decompose(job_id: str) -> int:
     """Full decompose phase. Returns number of shots found."""
     db = get_db()
@@ -165,16 +181,16 @@ def run_decompose(job_id: str) -> int:
             duration_s = float(probe.stdout.strip())
             max_seconds = max_minutes * 60
             if duration_s > max_seconds:
-                # Format both sides in whole seconds. Rendering a 0.5 min cap
-                # and a 31s clip as "0.5 min" vs "0.5 min" made a real limit
-                # read as a bug. Ceil the actual duration so the two numbers
-                # can never print equal on a strictly-greater comparison.
+                # Both sides through _fmt_duration so the cap and the actual
+                # length are always in the same unit. Ceiling the duration also
+                # keeps the two from printing equal on a strictly-greater
+                # comparison (a 30.2s clip against a 30s cap).
                 job_ref.update({
                     "status": "error",
                     "errorMessage": (
                         f"Video too long — your {user_plan} plan supports up to "
-                        f"{int(max_seconds)}s, but this video is "
-                        f"{math.ceil(duration_s)}s. "
+                        f"{_fmt_duration(max_seconds)}, but this video is "
+                        f"{_fmt_duration(duration_s)}. "
                         f"Upgrade your plan to process longer videos."
                     ),
                 })
