@@ -3,6 +3,12 @@ Modal app definition — image and app object shared across all modules.
 Deploy with: modal deploy modal_app/app.py
 """
 
+# modal deploy imports this file with the LOCAL interpreter, which is 3.9 here,
+# while the container runs 3.13. Without deferred annotations a `str | None`
+# in a signature is evaluated at import time and 3.9 raises TypeError, so the
+# deploy fails before it starts.
+from __future__ import annotations
+
 import modal
 
 app = modal.App("scenefixer")
