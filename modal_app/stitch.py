@@ -57,13 +57,30 @@ def restitch(job_id: str) -> str:
     errors_snap = (
         db.collection("jobs").document(job_id).collection("errors").get()
     )
-    fixed_clips: dict[str, str] = {}
+    # shotId -> (fixedClipUrl, lead-in seconds). The lead-in is how much of the
+    # fixed clip sits before the shot begins: a shot shorter than Runway's
+    # minimum accepted length is extracted with padding on both sides, so what
+    # comes back is longer than the shot and starts earlier than it. Splicing
+    # that in whole would replace the shot with a longer segment and push every
+    # following segment out of sync with the audio.
+    fixed_clips: dict[str, tuple[str, float, float]] = {}
     for err_doc in errors_snap:
         err = err_doc.to_dict()
         if err.get("fixStatus") == "fixed" and err.get("fixedClipUrl"):
             fix_direction = err.get("fixDirection", "aTob")
             target_shot = err["shotBId"] if fix_direction == "aTob" else err["shotAId"]
-            fixed_clips[target_shot] = err["fixedClipUrl"]
+
+            def _num(key: str) -> float:
+                try:
+                    return max(0.0, float(err.get(key) or 0.0))
+                except (TypeError, ValueError):
+                    return 0.0
+
+            fixed_clips[target_shot] = (
+                err["fixedClipUrl"],
+                _num("clipLeadInSeconds"),
+                _num("clipSpanSeconds"),
+            )
 
     with tempfile.TemporaryDirectory() as tmp:
         video_local = os.path.join(tmp, "original.mp4")
@@ -97,17 +114,42 @@ def restitch(job_id: str) -> str:
                 # identical — Aleph never touches anything outside the marked
                 # region, so this is always frame-accurate.
                 raw_path = os.path.join(tmp, f"seg_{shot['index']}_raw.mp4")
-                download_file(fixed_clips[shot["id"]], raw_path)
+                fixed_url, lead_in, clip_span_s = fixed_clips[shot["id"]]
+                download_file(fixed_url, raw_path)
+
+                shot_span_s = (shot["endMs"] - shot["startMs"]) / 1000.0
+                # Keyed on the clip being longer than the shot, not on lead_in
+                # alone: a short shot at the very start of a video gets all its
+                # padding on the trailing side, so lead_in is zero and the clip
+                # is still too long. Errors fixed before clipSpanSeconds existed
+                # record 0 and are left alone.
+                if clip_span_s > shot_span_s + 0.01:
+                    # Cut the padding back off so the segment covers exactly the
+                    # shot again.
+                    trimmed_path = os.path.join(tmp, f"seg_{shot['index']}_trim.mp4")
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y",
+                            "-ss", str(lead_in),
+                            "-i", raw_path,
+                            "-t", str(shot_span_s),
+                            "-c:v", "libx264", "-crf", "18",
+                            "-pix_fmt", "yuv420p",
+                            "-an",
+                            trimmed_path,
+                        ],
+                        capture_output=True, check=True,
+                    )
+                    raw_path = trimmed_path
 
                 if has_audio:
                     audio_path = os.path.join(tmp, f"audio_{shot['index']}.aac")
-                    duration_s = (shot["endMs"] - shot["startMs"]) / 1000.0
                     subprocess.run(
                         [
                             "ffmpeg", "-y",
                             "-ss", str(shot["startMs"] / 1000.0),
                             "-i", video_local,
-                            "-t", str(duration_s),
+                            "-t", str(shot_span_s),
                             "-vn", "-c:a", "aac", "-ar", "44100", "-ac", "2",
                             audio_path,
                         ],

@@ -23,7 +23,16 @@ from modal_app.firebase import get_db, get_bucket
 from modal_app.prompts import build_aleph_prompt
 
 MAX_CLIP_DURATION = 28.0  # aleph2 accepts up to 30s; 28s gives a small safety margin
-MIN_CLIP_DURATION = 1.1  # Runway rejects clips < 1s; pad a bit for safety
+# aleph2 rejects any videoUri under 2 seconds:
+#   {"code":"too_small","minimum":2,"message":"Asset duration must be at least
+#    2 seconds","path":["videoUri"]}
+# The old value of 1.1 was gen4_aleph's limit (it rejected clips under 1s) and
+# survived the aleph2 migration unchanged. Every shot shorter than 2s therefore
+# 400'd on submit — on 30 August one 5-shot video with shots of 0.50s, 0.97s,
+# 1.00s and 1.50s failed all four fixes for exactly this reason. 2.2s keeps the
+# same style of margin over the hard minimum that MAX_CLIP_DURATION keeps under
+# the maximum.
+MIN_CLIP_DURATION = 2.2
 TARGET_W, TARGET_H = 1280, 720
 RUNWAY_BASE = "https://api.dev.runwayml.com"
 RUNWAY_VERSION = "2024-11-06"
@@ -38,24 +47,97 @@ def _public_url(bucket_name: str, storage_path: str) -> str:
     return f"https://firebasestorage.googleapis.com/v0/b/{bucket_name}/o/{encoded}?alt=media"
 
 
-def extract_clip(video_path: str, start_ms: float, end_ms: float, out_path: str) -> str:
-    """
-    Extract a 1280x720 / 24fps clip for Aleph.
+def _probe_duration(video_path: str) -> float | None:
+    """Length of a local video in seconds, or None if ffprobe cannot say."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(probe.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
 
-    Aleph rejects clips < 1 second, so for short shots we extend the clip
-    by going earlier and later in the source video. The fixed clip will be
-    trimmed back to the original shot duration at stitch time so video
-    sync is preserved.
+
+def _clip_window(video_path: str, start_ms: float, end_ms: float) -> tuple[float, float]:
+    """
+    Pick the (start_s, duration_s) to hand ffmpeg for one shot.
+
+    A shot shorter than MIN_CLIP_DURATION is padded outwards from its midpoint,
+    because Runway rejects the submission outright below that length. Padding
+    alone is not enough: `-ss start -t duration` past the end of the source
+    yields a SHORTER file than requested, so a short shot at the very end of a
+    video would still produce an under-length clip and still 400. The window is
+    therefore slid back to fit inside the source before it is returned.
     """
     shot_dur = (end_ms - start_ms) / 1000.0
     duration_s = max(MIN_CLIP_DURATION, min(shot_dur, MAX_CLIP_DURATION))
 
     if duration_s > shot_dur:
-        # Center the extra padding around the original shot midpoint
-        extra = duration_s - shot_dur
-        start_s = max(0.0, start_ms / 1000.0 - extra / 2)
+        # Centre the extra padding on the original shot midpoint.
+        start_s = max(0.0, start_ms / 1000.0 - (duration_s - shot_dur) / 2)
     else:
         start_s = start_ms / 1000.0
+
+    source_dur = _probe_duration(video_path)
+    if source_dur is not None:
+        if source_dur < duration_s:
+            # The whole video is shorter than Runway's minimum. Nothing we can
+            # extract will be accepted, so say so instead of submitting and
+            # letting a 400 come back as an opaque failure.
+            raise RuntimeError(
+                f"Source video is {source_dur:.2f}s but Runway requires at least "
+                f"{MIN_CLIP_DURATION:.1f}s of video to edit."
+            )
+        start_s = min(start_s, source_dur - duration_s)
+        start_s = max(0.0, start_s)
+
+    return start_s, duration_s
+
+
+def extract_clip(
+    video_path: str,
+    start_ms: float,
+    end_ms: float,
+    out_path: str,
+    pad_to_frame: bool = True,
+) -> str:
+    """
+    Extract a 24fps clip for Aleph, at most TARGET_W x TARGET_H.
+
+    aleph2 rejects clips under MIN_CLIP_DURATION, so for short shots the
+    window is extended earlier and later in the source video (see
+    _clip_window). The fixed clip is trimmed back to the original shot
+    duration at stitch time so video sync is preserved.
+
+    `pad_to_frame` letterboxes the clip into a full TARGET_W x TARGET_H frame.
+    That is required whenever a bbox is involved, because every bbox in this
+    system is normalised against the padded frame the keyframes were cut from,
+    and unpadded video would put every red box in the wrong place.
+
+    It is wrong everywhere else. A portrait video padded into a 16:9 frame
+    arrives at aleph2 as a picture with two black panels in it, and aleph2
+    treats them as canvas: the first corrected clip generated after the
+    keyframe fix came back with the bars filled in with invented houses and
+    lawn. Whole-clip regrades use no bbox, so they send the shot at its own
+    aspect ratio and there is nothing to fill. Stitch pads it back on the way
+    out, so final output geometry is unchanged either way.
+    """
+    start_s, duration_s = _clip_window(video_path, start_ms, end_ms)
+
+    if pad_to_frame:
+        vf = (
+            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24"
+        )
+    else:
+        # Fit inside the same bounds, keep the source aspect, force even
+        # dimensions (libx264 with yuv420p rejects odd width or height).
+        vf = (
+            f"scale=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=decrease:"
+            f"force_divisible_by=2,fps=24"
+        )
 
     result = subprocess.run(
         [
@@ -63,9 +145,7 @@ def extract_clip(video_path: str, start_ms: float, end_ms: float, out_path: str)
             "-ss", str(start_s),
             "-i", video_path,
             "-t", str(duration_s),
-            "-vf",
-            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24",
+            "-vf", vf,
             "-c:v", "libx264", "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-an",
@@ -155,8 +235,6 @@ def runway_credit_balance() -> int | None:
 def apply_runway_fix(
     clip_public_url: str,
     prompt: str,
-    marker_url: str | None = None,
-    fallback_prompt: str | None = None,
 ) -> dict:
     """
     Submit clip to Runway aleph2. Returns {"url", "cost", "task_id"}.
@@ -172,18 +250,35 @@ def apply_runway_fix(
       * `ratio` is deprecated on aleph2 and is no longer sent. Output geometry
         follows the input clip, which extract_clip already normalises to
         1280x720/24fps.
-      * `references` does not exist on aleph2. The nearest equivalent is
-        `keyframes` — a timed guidance image anchored at a timestamp. Only the
-        wholeclip (lighting/atmosphere) path ever passed an image here, and it
-        passes a clean unannotated keyframe, so anchoring it at t=0 is safe.
-        The in-video red box is burned into the clip itself and is unaffected.
+      * `references` does not exist on aleph2 and `keyframes` IS NOT ITS
+        EQUIVALENT. Per the live spec, keyframes are "timed guidance images
+        placed at specific points in the input video" and `seconds` is "the
+        absolute timestamp when this guidance image should apply" — a keyframe
+        is a target the output must match at that time, not context the model
+        may consult. gen4_aleph's `references` was the latter.
+
+        The migration treated them as equivalent and kept feeding the wholeclip
+        path the target shot's own first keyframe at seconds=0 — a frame of the
+        unfixed footage. That instructed aleph2 to reproduce, at t=0, the exact
+        look it was being asked to remove, while the prompt added "use the
+        reference image as the visual target for the correct look". Every
+        wholeclip fix between 25 August and now came back with the original
+        look at the head of the clip, drifting away over its length, and was
+        correctly refunded as unverified.
+
+        No image is sent for wholeclip work now. There is no image of the
+        desired result to send — that is what we are asking aleph2 to produce.
+        The in-video red box is burned into the clip itself and is unaffected;
+        the marker path never used keyframes.
       * `range` is deliberately omitted: it restricts the edit to a time
         window, which for a whole-clip regrade is the opposite of intended.
       * videoUri must be <= 30s, which MAX_CLIP_DURATION already guarantees.
 
-    If Runway rejects the keyframes payload (400), automatically retries with
-    `fallback_prompt` and no keyframes — so malformed guidance never kills the
-    whole fix.
+    No guidance image is ever sent. Every image this pipeline can produce is
+    either the footage we are trying to change or a frame with a review marker
+    drawn on it, and `keyframes` would make aleph2 reproduce it. The spatial
+    signal is the red box burned into the clip itself; the look is carried by
+    promptText. Marker images are still built and stored, for the UI only.
 
     Uses requests (not httpx/SDK) to avoid SSL issues in Modal.
     Polls up to 12 minutes.
@@ -195,40 +290,19 @@ def apply_runway_fix(
         "X-Runway-Version": RUNWAY_VERSION,
     }
 
-    base_payload: dict = {
+    payload: dict = {
         "model": RUNWAY_MODEL,
         "promptText": prompt[:RUNWAY_PROMPT_MAX],
         "videoUri": clip_public_url,
     }
 
-    if marker_url:
-        payload = {
-            **base_payload,
-            "keyframes": [{"uri": marker_url, "seconds": 0}],
-        }
-    else:
-        payload = base_payload
-
-    print(f"Runway submit prompt: {prompt!r} marker={bool(marker_url)}")
+    print(f"Runway submit prompt: {prompt!r}")
     resp = requests.post(
         f"{RUNWAY_BASE}/v1/video_to_video",
         headers=headers,
         json=payload,
         timeout=60,
     )
-
-    if not resp.ok and resp.status_code == 400 and marker_url:
-        body = resp.text
-        print(f"Runway rejected request with marker ({body[:300]}); retrying without marker")
-        retry_prompt = fallback_prompt or prompt
-        retry_payload = {**base_payload, "promptText": retry_prompt}
-        print(f"Runway retry prompt: {retry_prompt!r}")
-        resp = requests.post(
-            f"{RUNWAY_BASE}/v1/video_to_video",
-            headers=headers,
-            json=retry_payload,
-            timeout=60,
-        )
 
     if not resp.ok:
         raise RuntimeError(
@@ -369,13 +443,7 @@ def extract_clip_with_in_video_marker(
     Accepts a single bbox dict (legacy) or a list of bboxes (e.g. multiple
     scattered bullet holes).
     """
-    shot_dur = (end_ms - start_ms) / 1000.0
-    duration_s = max(MIN_CLIP_DURATION, min(shot_dur, MAX_CLIP_DURATION))
-    if duration_s > shot_dur:
-        extra = duration_s - shot_dur
-        start_s = max(0.0, start_ms / 1000.0 - extra / 2)
-    else:
-        start_s = start_ms / 1000.0
+    start_s, duration_s = _clip_window(video_path, start_ms, end_ms)
 
     if isinstance(bboxes, dict):
         bboxes = [bboxes]
@@ -616,7 +684,6 @@ def _fix_long_shot_chunked(
     prompt: str,
     bucket,
     tmp: str,
-    reference_url: str | None = None,
 ) -> tuple[str, float | None]:
     """
     Fix a shot longer than MAX_CLIP_DURATION by splitting into ≤5s chunks,
@@ -657,7 +724,7 @@ def _fix_long_shot_chunked(
         chunk_public_url = _public_url(bucket.name, chunk_storage)
 
         print(f"  Chunk {i+1}/{n_chunks}: sending to Runway…")
-        rw = apply_runway_fix(chunk_public_url, prompt, marker_url=reference_url)
+        rw = apply_runway_fix(chunk_public_url, prompt)
         runway_url = rw["url"]
         if rw.get("cost") is None:
             cost_known = False
@@ -765,6 +832,18 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             # Extract shot clip. For in-video marker mode, burn the red box
             # into every frame — strongest possible signal for Aleph.
             clip_local = os.path.join(tmp, f"clip_{error_id}.mp4")
+            # The same window the extract helpers will compute. Captured here,
+            # while the downloaded source still exists, because restitch needs
+            # to know how much of the returned clip sits BEFORE the shot: a
+            # shot shorter than MIN_CLIP_DURATION is padded on both sides so
+            # Runway will accept it, so the fixed clip is longer than the shot
+            # and does not start where the shot starts. Splicing it in whole
+            # would drift every segment after it.
+            clip_start_s, clip_span_s = _clip_window(
+                video_local, fix_shot["startMs"], fix_shot["endMs"]
+            )
+            clip_lead_in_s = max(0.0, fix_shot["startMs"] / 1000.0 - clip_start_s)
+
             if in_video_marker:
                 extract_clip_with_in_video_marker(
                     video_local,
@@ -777,7 +856,15 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     f"Extracted clip with {len(target_bboxes)} in-video marker(s)"
                 )
             else:
-                extract_clip(video_local, fix_shot["startMs"], fix_shot["endMs"], clip_local)
+                extract_clip(
+                    video_local,
+                    fix_shot["startMs"],
+                    fix_shot["endMs"],
+                    clip_local,
+                    # No bbox on this path, so nothing depends on the padded
+                    # frame — and the black bars would be outpainted.
+                    pad_to_frame=not is_wholeclip_type,
+                )
 
             # Upload input clip to Firebase so Runway can fetch it via public URL
             clip_storage = f"jobs/{job_id}/clips/{error_id}_input.mp4"
@@ -788,18 +875,12 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             relocated_bbox: dict | None = None
             best_keyframe_url: str | None = None
 
-            # For wholeclip types, skip the marker pipeline entirely and instead
-            # use the first keyframe of the shot as an Aleph reference image.
-            # This gives Aleph a visual anchor for the "correct" look without
-            # confusing it with spatial inpainting signals.
-            if is_wholeclip_type:
-                kf_urls = fix_shot.get("keyframeUrls") or []
-                if not isinstance(kf_urls, list) or not kf_urls:
-                    single = fix_shot.get("keyframeUrl")
-                    kf_urls = [single] if isinstance(single, str) else []
-                if kf_urls:
-                    marker_url = kf_urls[0]
-                    print(f"Wholeclip reference frame: {marker_url}")
+            # Wholeclip types (lighting/atmosphere) send no guidance image at
+            # all — see the note on `keyframes` in apply_runway_fix. The only
+            # frame we have of this shot is the frame we are trying to change,
+            # and aleph2 treats a keyframe as a target to reproduce, not as
+            # context. There is no correct image to send here, so nothing is
+            # sent, and promptText carries the whole instruction.
 
             # When the red box is burned into the video itself, we don't
             # also send a separate reference image — the in-video marker is
@@ -903,15 +984,14 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             # Build Aleph prompts
             prompt = build_aleph_prompt(
                 error,
-                has_marker=bool(marker_url),
+                # Always False: no reference image is sent to aleph2 any more,
+                # so no prompt may tell it to "use the reference image as the
+                # visual target". That sentence, paired with a keyframe of the
+                # unfixed footage, is what made every wholeclip fix reproduce
+                # the error it was asked to remove.
+                has_marker=False,
                 in_video_marker=in_video_marker,
             )
-            fallback_prompt = (
-                build_aleph_prompt(error, has_marker=False, in_video_marker=in_video_marker)
-                if marker_url
-                else None
-            )
-
             shot_dur = (fix_shot["endMs"] - fix_shot["startMs"]) / 1000.0
             fixed_local = os.path.join(tmp, f"clip_{error_id}_fixed.mp4")
 
@@ -930,18 +1010,12 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     prompt=prompt,
                     bucket=bucket,
                     tmp=tmp,
-                    reference_url=marker_url if is_wholeclip_type else None,
                 )
                 import shutil
                 shutil.copy2(chunked_path, fixed_local)
             else:
                 # Short shot (≤5s): single Runway call
-                result = apply_runway_fix(
-                    clip_public_url,
-                    prompt,
-                    marker_url=marker_url,
-                    fallback_prompt=fallback_prompt,
-                )
+                result = apply_runway_fix(clip_public_url, prompt)
                 runway_url = result["url"]
                 runway_cost = result.get("cost")
                 runway_task_id = result.get("task_id")
@@ -966,6 +1040,8 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             "fixStatus": "fixed",
             "fixedClipUrl": fixed_firebase_url,
             "originalClipUrl": clip_public_url,
+            "clipLeadInSeconds": round(clip_lead_in_s, 3),
+            "clipSpanSeconds": round(clip_span_s, 3),
             "alephPrompt": prompt,
             "verifyResult": verify_result,
             "verifiedResolved": verified_resolved,
