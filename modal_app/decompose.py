@@ -181,7 +181,14 @@ def run_decompose(job_id: str) -> int:
         try:
             duration_s = float(probe.stdout.strip())
             max_seconds = max_minutes * 60
-            if duration_s > max_seconds:
+            # Compare whole seconds. An export lands a few frames past a round
+            # number all the time — 30.13s and 30.21s were both rejected
+            # against a 30s cap — and "your 30 second video is too long for
+            # your 30 second limit" is not a defensible thing to tell someone
+            # who has just sat through the upload. Anything that rounds down to
+            # the cap is inside it; the fix pipeline works per shot, so a
+            # fraction of a second over changes nothing downstream.
+            if math.floor(duration_s) > max_seconds:
                 # Both sides through _fmt_duration so the cap and the actual
                 # length are always in the same unit. Ceiling the duration also
                 # keeps the two from printing equal on a strictly-greater

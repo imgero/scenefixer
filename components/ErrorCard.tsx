@@ -90,6 +90,43 @@ export default function ErrorCard({
 }: Props) {
   const errorRef = doc(db, "jobs", jobId, "errors", error.id);
 
+  /**
+   * Every confirm/reset button is an async onClick, so a rejected write is an
+   * unhandled promise rejection — which is how seven `FirebaseError: Missing
+   * or insufficient permissions` reached one user with no stack and nothing
+   * saying which write had failed. The rejection is now caught, named, and
+   * shown to the user instead of thrown into the void.
+   */
+  const [writeError, setWriteError] = useState<string | null>(null);
+
+  const applyUpdate = async (
+    operation: string,
+    payload: Record<string, unknown>
+  ): Promise<boolean> => {
+    try {
+      await updateDoc(errorRef, payload);
+      setWriteError(null);
+      return true;
+    } catch (e) {
+      const code = (e as { code?: string }).code ?? null;
+      posthog.capture("firestore_write_failed", {
+        operation,
+        job_id: jobId,
+        error_id: error.id,
+        error_type: error.type,
+        fix_status: error.fixStatus ?? null,
+        code,
+        message: (e as Error).message,
+      });
+      setWriteError(
+        code === "permission-denied"
+          ? "We couldn't save that selection. Reload the page and try again."
+          : "We couldn't save that selection. Please try again."
+      );
+      return false;
+    }
+  };
+
   // Client capture proves the click; the server receipt proves the Firestore
   // write actually landed. Both are emitted, under different names, because a
   // click that never persisted is exactly the case we could not previously see.
@@ -157,21 +194,21 @@ export default function ErrorCard({
   const pickRemove = async () => {
     if (isFixing) return;
     setReplaceMode(false);
-    await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "remove", replaceWith: "" }));
+    if (!(await applyUpdate("pick_remove", baseUpdate({ userConfirmed: true, fixMode: "remove", replaceWith: "" })))) return;
     await recordConfirm("remove");
   };
 
   const pickWholeclip = async () => {
     if (isFixing) return;
     const prompt = (error.fixSuggestion || error.description || "Fix the visual inconsistency").trim();
-    await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: prompt }));
+    if (!(await applyUpdate("pick_wholeclip", baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: prompt })))) return;
     await recordConfirm("wholeclip");
   };
 
   const pickRestore = async () => {
     if (isFixing) return;
     const suggestion = (error.fixSuggestion || error.description || "").trim();
-    await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: suggestion }));
+    if (!(await applyUpdate("pick_restore", baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: suggestion })))) return;
     await recordConfirm("restore");
   };
 
@@ -189,11 +226,11 @@ export default function ErrorCard({
     // Flip the fix direction: instead of adding the object to Shot B,
     // remove it from Shot A so both shots are consistent.
     const flippedDirection = error.fixDirection === "aTob" ? "bToA" : "aTob";
-    await updateDoc(errorRef, baseUpdate({
+    if (!(await applyUpdate("pick_remove_from_source", baseUpdate({
       userConfirmed: true,
       fixMode: "remove",
       fixDirection: flippedDirection,
-    }));
+    })))) return;
     await recordConfirm("remove_from_source");
   };
 
@@ -202,7 +239,7 @@ export default function ErrorCard({
     const value = replaceDraft.trim().slice(0, 200);
     if (!value) return;
     setReplaceMode(false);
-    await updateDoc(errorRef, baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: value }));
+    if (!(await applyUpdate("pick_replace", baseUpdate({ userConfirmed: true, fixMode: "replace", replaceWith: value })))) return;
     await recordConfirm("replace");
   };
 
@@ -210,7 +247,7 @@ export default function ErrorCard({
     if (isFixing) return;
     setReplaceDraft("");
     setReplaceMode(false);
-    await updateDoc(errorRef, { userConfirmed: false, fixMode: "", replaceWith: "" });
+    await applyUpdate("reset", { userConfirmed: false, fixMode: "", replaceWith: "" });
   };
 
   const handleDelete = async () => {
@@ -315,6 +352,12 @@ export default function ErrorCard({
           )}
         </div>
       </div>
+
+      {writeError && (
+        <p className="mb-3 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+          {writeError}
+        </p>
+      )}
 
       {/* Collapsible body */}
       {!collapsed && (

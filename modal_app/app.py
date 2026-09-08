@@ -43,6 +43,57 @@ def _verify_token(credentials: HTTPAuthorizationCredentials = Security(security)
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+# Failures that are ours, not the user's. The message the user sees, and
+# whether their free daily scan is given back, both hang off this.
+#
+# On 4 September the Anthropic account ran out of credit mid-session and three
+# analyses failed in the detect phase. `errorMessage` was set to the raw
+# upstream string — "Your credit balance is too low to access the Anthropic
+# API. Please go to Plans & Billing to upgrade or purchase credits." — so the
+# users were shown our supplier's dunning notice as though it were about their
+# own account, and each still lost one of their three daily scans.
+_UPSTREAM_OUTAGE_MARKERS = (
+    "credit balance is too low",
+    "rate_limit_error",
+    "overloaded_error",
+    "insufficient_quota",
+)
+
+_OUTAGE_MESSAGE = (
+    "Analysis is temporarily unavailable — this is a problem on our side, "
+    "not with your video. Your scan has not been counted. Please try again "
+    "shortly."
+)
+
+
+def _is_upstream_outage(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _UPSTREAM_OUTAGE_MARKERS)
+
+
+def _refund_daily_scan(owner_uid: str | None) -> bool:
+    """
+    Give back the free-tier scan consumed by /api/jobs/[id]/start.
+
+    The scan is counted before analysis runs, so a failure that is ours leaves
+    the user one scan poorer for work we never did.
+    """
+    if not owner_uid:
+        return False
+    try:
+        from modal_app.firebase import get_db
+
+        ref = get_db().collection("users").document(owner_uid)
+        data = ref.get().to_dict() or {}
+        scans_today = data.get("scansToday")
+        if isinstance(scans_today, int) and scans_today > 0:
+            ref.update({"scansToday": scans_today - 1})
+            return True
+    except Exception as exc:
+        print(f"scan refund failed for {owner_uid}: {exc}")
+    return False
+
+
 @app.function(
     image=image,
 
@@ -93,10 +144,17 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
         # status to awaiting_confirmation.
         from modal_app.firebase import get_db
         current = get_db().collection("jobs").document(job_id).get().to_dict() or {}
+        outage = _is_upstream_outage(e)
+        scan_refunded = _refund_daily_scan(current.get("ownerUid")) if outage else False
+
         if current.get("status") not in ("awaiting_confirmation", "fixing", "verifying", "done"):
             get_db().collection("jobs").document(job_id).update({
                 "status": "error",
-                "errorMessage": str(e),
+                # Never show the user an upstream provider's billing or rate
+                # limit text — it reads as a complaint about their account.
+                "errorMessage": _OUTAGE_MESSAGE if outage else str(e),
+                "errorIsOurs": outage,
+                "retryable": outage,
             })
 
         analytics.capture(
@@ -107,6 +165,10 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
                 "exception_type": type(e).__name__,
                 "phase": "detect" if current.get("shotCount") else "decompose",
                 "shot_count": current.get("shotCount", 0),
+                # Separates "we broke" from "this video could not be analysed",
+                # which is the difference between an alert and a data point.
+                "upstream_outage": outage,
+                "scan_refunded": scan_refunded,
             },
             job=current,
         )
