@@ -112,19 +112,80 @@ export default function DropZone() {
 
         const { jobId, uploadUrl, storagePath } = await res.json();
 
-        // 2. PUT directly to the signed URL
+        // 2. PUT directly to the signed URL.
+        //
+        // Nothing was ever reported between job_created and video_uploaded, and
+        // 19 of 43 jobs in the first two weeks never got past `status:
+        // "uploading"` — the user picked a file, the record was written, and the
+        // upload silently never landed. With no event on this step there was no
+        // way to tell a network failure from an expired URL from a file the
+        // browser could not read. Every outcome here is now reported.
+        const uploadStartedAt = Date.now();
+        const sizeMb = Math.round(file.size / 1024 / 1024);
+        posthog.capture("upload_started", {
+          job_id: jobId,
+          file_size_mb: sizeMb,
+          file_type: file.type,
+          is_beta: !!betaId,
+        });
+
+        const reportUploadFailure = (reason: string, extra: Record<string, unknown> = {}) => {
+          posthog.capture("upload_failed", {
+            job_id: jobId,
+            reason,
+            file_size_mb: sizeMb,
+            file_type: file.type,
+            elapsed_ms: Date.now() - uploadStartedAt,
+            is_beta: !!betaId,
+            ...extra,
+          });
+        };
+
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open("PUT", uploadUrl, true);
           xhr.setRequestHeader("Content-Type", file.type);
+          // Without a timeout a stalled PUT hangs forever: no progress, no
+          // error, no event, and a job left in "uploading" for good.
+          xhr.timeout = 15 * 60 * 1000;
+          let lastLoaded = 0;
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
+              lastLoaded = e.loaded;
               setProgress(Math.round((e.loaded / e.total) * 100));
             }
           };
-          xhr.onload = () => (xhr.status === 200 ? resolve() : reject(new Error(`Upload failed: ${xhr.status}`)));
-          xhr.onerror = () => reject(new Error("Upload network error"));
+          xhr.onload = () => {
+            if (xhr.status === 200) {
+              resolve();
+              return;
+            }
+            reportUploadFailure("http_status", {
+              http_status: xhr.status,
+              bytes_sent: lastLoaded,
+            });
+            reject(new Error(`Upload failed: ${xhr.status}`));
+          };
+          xhr.onerror = () => {
+            reportUploadFailure("network_error", { bytes_sent: lastLoaded });
+            reject(new Error("Upload network error"));
+          };
+          xhr.ontimeout = () => {
+            reportUploadFailure("timeout", { bytes_sent: lastLoaded });
+            reject(new Error("Upload timed out"));
+          };
+          xhr.onabort = () => {
+            reportUploadFailure("aborted", { bytes_sent: lastLoaded });
+            reject(new Error("Upload aborted"));
+          };
           xhr.send(file);
+        });
+
+        posthog.capture("upload_completed", {
+          job_id: jobId,
+          file_size_mb: sizeMb,
+          elapsed_ms: Date.now() - uploadStartedAt,
+          is_beta: !!betaId,
         });
 
         const encodedPath = encodeURIComponent(storagePath);
@@ -143,6 +204,16 @@ export default function DropZone() {
         });
         if (!startRes.ok) {
           const startData = await startRes.json().catch(() => ({}));
+          // The upload landed and the pipeline refused to start. That is a
+          // different failure from an upload that never arrived, and it left
+          // exactly the same trace as one: a job stuck in "uploading".
+          posthog.capture("pipeline_start_failed", {
+            job_id: jobId,
+            http_status: startRes.status,
+            code: startData.code ?? null,
+            message: startData.error ?? null,
+            is_beta: !!betaId,
+          });
           throw new Error(startData.error ?? "Failed to start pipeline");
         }
 

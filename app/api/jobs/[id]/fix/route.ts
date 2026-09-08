@@ -45,6 +45,13 @@ async function calcCreditsNeeded(
   for (const e of errorsSnap.docs) {
     const err = e.data();
     if (err.fixStatus === "fixed") continue;
+    // An error detection has marked unrepairable cannot be fixed by editing the
+    // footage — it needs a re-shoot, a re-frame, or a re-stage. Attempting one
+    // spends Runway credits to produce something the verifier correctly
+    // rejects, refunds the user, and leaves them with nothing. It is never
+    // charged for and never attempted. Absent field means repairable, so
+    // errors detected before this existed are unaffected.
+    if (err.repairable === false) continue;
     const fixDirection = err.fixDirection ?? "aTob";
     const targetShotId = fixDirection === "aTob" ? err.shotBId : err.shotAId;
     const secs = shotDurations.get(targetShotId) ?? 5;

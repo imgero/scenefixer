@@ -227,6 +227,23 @@ def run_fix_phase(job_id: str):
             .get()
         )
 
+        # Defence in depth: the fix route already refuses to charge for an
+        # unrepairable error, so one reaching here means something upstream is
+        # wrong. Skipping is still correct — running it would burn credits on a
+        # result the verifier will correctly reject.
+        errors_snap = [
+            d for d in errors_snap if d.to_dict().get("repairable") is not False
+        ]
+        if not errors_snap:
+            db.collection("jobs").document(job_id).update({
+                "status": "awaiting_confirmation",
+                "errorMessage": (
+                    "None of the selected errors can be repaired by editing the "
+                    "footage. Nothing was charged."
+                ),
+            })
+            return {"ok": False, "skipped": "nothing_repairable"}
+
         # Per-error outcomes are tracked, not swallowed. A thrown fix used to be
         # printed and forgotten: the loop carried on, the job was marked "done",
         # the credits stayed spent, and the user was handed an "output" that was

@@ -84,6 +84,31 @@ def _frame_urls(shot: dict) -> list[str]:
     return [single] if isinstance(single, str) else []
 
 
+def _repairability(err: dict) -> dict:
+    """
+    Whether a text-instructed edit of existing footage can plausibly fix this.
+
+    The pipeline can change how a shot looks. It cannot move the camera,
+    re-frame a shot, or re-stage what happened. An error that needs any of
+    those is worth telling the user about and must never be offered a fix —
+    every attempt spends Runway credits to produce something the verifier will
+    correctly reject, and the credits come back, and the user gets nothing.
+
+    Absent field means repairable, so errors detected before this existed keep
+    behaving as they did.
+    """
+    repairable = err.get("repairable")
+    if repairable is None:
+        return {"repairable": True}
+    if repairable:
+        return {"repairable": True}
+    reason = (err.get("not_repairable_reason") or "").strip()
+    return {
+        "repairable": False,
+        "notRepairableReason": reason or "would need different footage, not an edit",
+    }
+
+
 def compare_pair(
     job_id: str,
     shot_a: dict,
@@ -274,6 +299,7 @@ def write_errors(job_id: str, shot_a: dict, shot_b: dict, errors: list[dict]) ->
             "userConfirmed": False,
             "fixStatus": "pending",
             "verifiedResolved": False,
+            **_repairability(err),
             "createdAt": datetime.now(timezone.utc),
         }
         if bbox:
@@ -367,6 +393,8 @@ def detect_holistic(
         )
         err = {
             "type": err_type,
+            "repairable": outlier.get("repairable"),
+            "not_repairable_reason": outlier.get("not_repairable_reason", ""),
             "description": outlier.get("description", ""),
             "fix_suggestion": outlier.get("fix_suggestion", ""),
             "severity": outlier.get("severity", "medium"),

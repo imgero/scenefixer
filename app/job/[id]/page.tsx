@@ -152,8 +152,14 @@ export default function JobPage({ params }: Props) {
     return unsub;
   }, [jobId]);
 
+  // Mirrors what the fix route will actually charge for: an error detection
+  // marked unrepairable is skipped there, so counting it here would promise a
+  // fix the server is right to refuse.
   const confirmedCount = errors.filter(
-    (e) => e.userConfirmed && (e.fixStatus === "pending" || e.fixStatus === "failed")
+    (e) =>
+      e.userConfirmed &&
+      e.repairable !== false &&
+      (e.fixStatus === "pending" || e.fixStatus === "failed")
   ).length;
 
   const FIXING_TIMEOUT_MS = 20 * 60 * 1000;

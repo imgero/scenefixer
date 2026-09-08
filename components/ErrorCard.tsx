@@ -158,6 +158,11 @@ export default function ErrorCard({
     setReplaceDraft(error.replaceWith ?? "");
   }, [error.replaceWith]);
 
+  // Detection judged that editing the footage cannot repair this — it needs a
+  // re-shoot, a re-frame or a re-stage. Still worth showing: the user wants to
+  // know it is there. But offering a fix would spend their credits on a result
+  // the verifier correctly rejects, so no fix controls are rendered at all.
+  const notRepairable = error.repairable === false;
   const isFixing = error.fixStatus === "fixing";
   const isSelected = error.userConfirmed && !!error.fixMode;
   const fixStatusLabel = FIX_STATUS_LABELS[error.fixStatus];
@@ -367,7 +372,21 @@ export default function ErrorCard({
 
           {/* Action row */}
           <div className="mb-4">
-            {!isSelected && !replaceMode && (
+            {notRepairable && (
+              <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5">
+                <p className="text-sm font-medium text-gray-900">
+                  Flagged, but not fixable by an edit
+                </p>
+                <p className="mt-1 text-xs text-gray-600">
+                  {error.notRepairableReason
+                    ? error.notRepairableReason[0].toUpperCase() +
+                      error.notRepairableReason.slice(1)
+                    : "This would need different footage rather than a change to the existing shot."}{" "}
+                  You haven&apos;t been charged for it.
+                </p>
+              </div>
+            )}
+            {!notRepairable && !isSelected && !replaceMode && (
               <>
                 {!hasBbox && onAdjustLocation ? (
                   isWholeclipType ? (

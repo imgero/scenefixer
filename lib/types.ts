@@ -108,6 +108,20 @@ export type ContinuityError = {
   relocatedBbox?: BBox;
   alephPrompt?: string;
   retryCount?: number;
+  /**
+   * Whether editing the footage can plausibly repair this.
+   *
+   * False for anything needing a re-shoot, re-frame or re-stage — camera
+   * movement, shot scale, eyeline, a subject morphing. Those are still worth
+   * showing the user, but must never be offered a fix: every attempt spends
+   * Runway credits on a result the verifier correctly rejects. Absent means
+   * repairable, so errors detected before this field existed are unaffected.
+   */
+  repairable?: boolean;
+  notRepairableReason?: string;
+  /** Overrides automatic engine routing — used to retry on a different model. */
+  fixEngine?: string;
+  fixEngineUsed?: string;
   verifiedResolved: boolean;
   verifyResult?: {
     errorStillVisible: boolean | null;

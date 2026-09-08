@@ -57,11 +57,48 @@ For each error return:
 
 Do NOT output bounding boxes — a separate model handles localization.
 
+
+REPAIRABILITY — decide this for every error you flag.
+
+The only repair available is a text-instructed edit of ONE shot's existing
+footage. It can change how things look. It cannot re-shoot, re-stage, re-time,
+or re-frame anything.
+
+repairable: true — the fix is a change of appearance within the existing frames
+  - colour grade, exposure, white balance, contrast
+  - sky, weather, time of day, season
+  - the look or content of a background
+  - an object added, removed, or swapped
+  - a wardrobe or hair item changed back
+  - film grain, sharpness, or overall processing style
+
+repairable: false — the fix would require different footage
+  - camera movement, zoom, push-in, dolly, or shake
+  - framing, shot scale, or subject size changing through the shot
+  - a person's face, body, or identity morphing between frames
+  - eyeline or where someone is looking
+  - blocking, choreography, or the order events happen in
+  - shot length, pacing, or anything about the cut itself
+
+If an error is PARTLY unrepairable, split it: flag the repairable half as its
+own error with a fix_suggestion covering only that half, and either drop the
+rest or flag it separately as repairable: false. Never write a fix_suggestion
+that asks for both — "match the background environment and camera scale
+consistently across all frames" is the shape to avoid, because the background
+half is doable and the camera-scale half never is, so the whole fix fails.
+
+When repairable is false also give:
+- not_repairable_reason: one short phrase for the user, naming what would be
+  needed instead (e.g. "would need a re-shoot — the camera pushes in")
+
+Flagging something unrepairable is useful; the user still wants to know. It
+just will not be offered a fix.
+
 Return STRICT JSON only:
 {
   "different_scene": false,
   "errors": [
-    { "type": "...", "description": "...", "fix_suggestion": "...", "severity": "...", "object_query": "...", "fix_target_shot": "A" or "B" }
+    { "type": "...", "description": "...", "fix_suggestion": "...", "severity": "...", "object_query": "...", "fix_target_shot": "A" or "B", "repairable": true, "not_repairable_reason": "" }
   ]
 }
 
@@ -89,10 +126,47 @@ For each error return:
 
 CRITICAL: you must VISUALLY CONFIRM the error in the frames before flagging. If you cannot see it in any frame, do not flag. Honest "I don't see it" beats confident hallucination.
 
+
+REPAIRABILITY — decide this for every error you flag.
+
+The only repair available is a text-instructed edit of ONE shot's existing
+footage. It can change how things look. It cannot re-shoot, re-stage, re-time,
+or re-frame anything.
+
+repairable: true — the fix is a change of appearance within the existing frames
+  - colour grade, exposure, white balance, contrast
+  - sky, weather, time of day, season
+  - the look or content of a background
+  - an object added, removed, or swapped
+  - a wardrobe or hair item changed back
+  - film grain, sharpness, or overall processing style
+
+repairable: false — the fix would require different footage
+  - camera movement, zoom, push-in, dolly, or shake
+  - framing, shot scale, or subject size changing through the shot
+  - a person's face, body, or identity morphing between frames
+  - eyeline or where someone is looking
+  - blocking, choreography, or the order events happen in
+  - shot length, pacing, or anything about the cut itself
+
+If an error is PARTLY unrepairable, split it: flag the repairable half as its
+own error with a fix_suggestion covering only that half, and either drop the
+rest or flag it separately as repairable: false. Never write a fix_suggestion
+that asks for both — "match the background environment and camera scale
+consistently across all frames" is the shape to avoid, because the background
+half is doable and the camera-scale half never is, so the whole fix fails.
+
+When repairable is false also give:
+- not_repairable_reason: one short phrase for the user, naming what would be
+  needed instead (e.g. "would need a re-shoot — the camera pushes in")
+
+Flagging something unrepairable is useful; the user still wants to know. It
+just will not be offered a fix.
+
 Return STRICT JSON only:
 {
   "errors": [
-    { "type": "...", "description": "...", "fix_suggestion": "...", "object_query": "...", "severity": "..." }
+    { "type": "...", "description": "...", "fix_suggestion": "...", "object_query": "...", "severity": "...", "repairable": true, "not_repairable_reason": "" }
   ]
 }
 
@@ -160,8 +234,45 @@ For each outlier return:
 - fix_suggestion: one imperative instruction (e.g. "Regrade this clip to match the warm golden-hour tone of the surrounding shots" or "Change the sky to overcast to match the rest of the sequence")
 - severity: "low" | "medium" | "high"
 
+
+REPAIRABILITY — decide this for every error you flag.
+
+The only repair available is a text-instructed edit of ONE shot's existing
+footage. It can change how things look. It cannot re-shoot, re-stage, re-time,
+or re-frame anything.
+
+repairable: true — the fix is a change of appearance within the existing frames
+  - colour grade, exposure, white balance, contrast
+  - sky, weather, time of day, season
+  - the look or content of a background
+  - an object added, removed, or swapped
+  - a wardrobe or hair item changed back
+  - film grain, sharpness, or overall processing style
+
+repairable: false — the fix would require different footage
+  - camera movement, zoom, push-in, dolly, or shake
+  - framing, shot scale, or subject size changing through the shot
+  - a person's face, body, or identity morphing between frames
+  - eyeline or where someone is looking
+  - blocking, choreography, or the order events happen in
+  - shot length, pacing, or anything about the cut itself
+
+If an error is PARTLY unrepairable, split it: flag the repairable half as its
+own error with a fix_suggestion covering only that half, and either drop the
+rest or flag it separately as repairable: false. Never write a fix_suggestion
+that asks for both — "match the background environment and camera scale
+consistently across all frames" is the shape to avoid, because the background
+half is doable and the camera-scale half never is, so the whole fix fails.
+
+When repairable is false also give:
+- not_repairable_reason: one short phrase for the user, naming what would be
+  needed instead (e.g. "would need a re-shoot — the camera pushes in")
+
+Flagging something unrepairable is useful; the user still wants to know. It
+just will not be offered a fix.
+
 Return STRICT JSON only:
-{"outliers": [{"shot_index": 0, "type": "...", "description": "...", "fix_suggestion": "...", "severity": "..."}]}
+{"outliers": [{"shot_index": 0, "type": "...", "description": "...", "fix_suggestion": "...", "severity": "...", "repairable": true, "not_repairable_reason": ""}]}
 
 If all consistent: {"outliers": []}"""
 
