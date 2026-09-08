@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb, adminStorage, adminAuth } from "@/lib/firebase-admin";
 import { createId } from "@paralleldrive/cuid2";
 import { FieldValue } from "firebase-admin/firestore";
-import { getPostHogClient } from "@/lib/posthog-server";
+import { captureServer } from "@/lib/posthog-server";
 import { notifyOwner } from "@/lib/notify";
 
 const BETA_MAX_CREDITS = 200;
@@ -94,11 +94,19 @@ export async function POST(req: NextRequest) {
         createdAt: FieldValue.serverTimestamp(),
       });
 
+    // Taken here, not inside after(). after() runs once the response has been
+    // sent and, on a frozen serverless instance, can run appreciably later —
+    // long enough that job_created appeared minutes after the job document's
+    // own createdAt, and that two unrelated creations looked like one
+    // double-submit ~3s apart. The event now carries the creation time.
+    const createdAt = new Date();
+
     after(async () => {
       const distinctId = uid ?? `beta_${betaToken?.slice(0, 8)}`;
-      getPostHogClient().capture({
+      await captureServer({
         distinctId,
         event: "job_created",
+        timestamp: createdAt,
         properties: {
           job_id: jobId,
           has_hint: !!cleanedHint,
@@ -106,7 +114,6 @@ export async function POST(req: NextRequest) {
           is_beta: isBeta,
         },
       });
-      await getPostHogClient().flush();
 
       const who = isBeta ? `Beta user (token: ${betaToken?.slice(0, 8)}…)` : `Signed-in user (uid: ${uid})`;
       notifyOwner(
