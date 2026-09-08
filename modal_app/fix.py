@@ -12,6 +12,7 @@ import base64
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -701,6 +702,59 @@ def make_marker_frame(
     return out_path
 
 
+# The observations are prose and the verdict is a small JSON object at the end.
+# Putting the per-frame descriptions INSIDE the JSON made the object long enough
+# that a truncated or slightly malformed reply could not be parsed at all — and
+# an unparsable reply becomes errorStillVisible None, which is not False, which
+# is recorded as unverified and refunded. Long prose plus a tiny tail object
+# keeps grounding without letting length decide the verdict.
+_VERDICT_FORMAT = (
+    "Then, on its own final line, output ONLY this JSON object and nothing after it:\n"
+    '{"errorStillVisible": true|false, "confidence": "low|medium|high", '
+    '"notes": "one sentence grounded in your observations"}'
+)
+
+
+def _parse_verdict(raw: str) -> dict:
+    """
+    Pull the verdict out of a reply that is prose followed by a JSON object.
+
+    Tries, in order: the last brace-balanced object in the text, then a plain
+    regex for the one field that decides the outcome. A reply we cannot read at
+    all returns None for errorStillVisible, and callers treat that as unverified
+    — so every recoverable shape must be recovered here rather than there.
+    """
+    depth = 0
+    end = -1
+    for i in range(len(raw) - 1, -1, -1):
+        c = raw[i]
+        if c == "}":
+            if depth == 0:
+                end = i
+            depth += 1
+        elif c == "{":
+            depth -= 1
+            if depth == 0 and end != -1:
+                try:
+                    obj = json.loads(raw[i : end + 1])
+                    if isinstance(obj, dict) and "errorStillVisible" in obj:
+                        return obj
+                except Exception:
+                    pass
+                end = -1
+                depth = 0
+
+    m = re.search(r'"errorStillVisible"\s*:\s*(true|false)', raw)
+    if m:
+        conf = re.search(r'"confidence"\s*:\s*"(low|medium|high)"', raw)
+        return {
+            "errorStillVisible": m.group(1) == "true",
+            "confidence": conf.group(1) if conf else "low",
+            "notes": raw[-300:],
+        }
+    return {"errorStillVisible": None, "confidence": "low", "notes": raw[-300:]}
+
+
 def verify_fix(fixed_clip_path: str, error: dict) -> dict:
     """
     Sample 5 frames evenly across the fixed clip and ask Opus 4.7 if the
@@ -765,8 +819,8 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
     if is_add_mode:
         audit_text = (
             f"You are auditing a video edit.\n\n"
-            f"FIRST, before judging anything, write `observed`: one short sentence per "
-            f"frame saying what you actually see in that frame. Describe only these "
+            f"FIRST, under a line reading OBSERVED:, write one short sentence per frame "
+            f"saying what you actually see in that frame. Describe only these "
             f"{len(frames)} images. You have NOT been shown the original clip and you "
             f"must not describe it or assume what it looked like.\n\n"
             f"THEN judge, using only your own observations above.\n"
@@ -776,17 +830,15 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
             f"Strict rules:\n"
             f"- Achieved in at least some frames → errorStillVisible: false (succeeded).\n"
             f"- Plainly not achieved → errorStillVisible: true (failed).\n"
-            f"- If your own `observed` notes do not support a verdict, say confidence low.\n"
+            f"- If your own observations do not support a verdict, say confidence low.\n"
             f"- Never restate a problem you did not observe in these frames.\n\n"
-            f'Return STRICT JSON only: {{"observed": ["frame 1: …", "frame 2: …", …], '
-            f'"errorStillVisible": true|false, "confidence": "low|medium|high", '
-            f'"notes": "one sentence grounded in your observations"}}'
+            + _VERDICT_FORMAT
         )
     else:
         audit_text = (
             f"You are auditing a video edit, which was meant to REMOVE something.\n\n"
-            f"FIRST, before judging anything, write `observed`: one short sentence per "
-            f"frame saying what you actually see in that frame. Describe only these "
+            f"FIRST, under a line reading OBSERVED:, write one short sentence per frame "
+            f"saying what you actually see in that frame. Describe only these "
             f"{len(frames)} images. You have NOT been shown the original clip and you "
             f"must not describe it or assume what it looked like.\n\n"
             f"THEN judge, using only your own observations above.\n"
@@ -801,10 +853,8 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
             f"artifact, or an obvious stand-in → errorStillVisible: true.\n"
             f"- Absent from every frame → errorStillVisible: false.\n"
             f"- Never restate a problem you did not observe in these frames. If your own "
-            f"`observed` notes do not mention it, you did not see it.\n\n"
-            f'Return STRICT JSON only: {{"observed": ["frame 1: …", "frame 2: …", …], '
-            f'"errorStillVisible": true|false, "confidence": "low|medium|high", '
-            f'"notes": "one sentence grounded in your observations"}}'
+            f"observations do not mention it, you did not see it.\n\n"
+            + _VERDICT_FORMAT
         )
 
     content.append({"type": "text", "text": audit_text})
@@ -816,30 +866,21 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
         # which does not fit in 512. A truncated reply fails json.loads, returns
         # errorStillVisible None, and None is not False — so the fix is recorded
         # unverified and refunded. Truncation must never be able to mean failure.
-        max_tokens=1500,
+        max_tokens=2000,
         messages=[{"role": "user", "content": content}],
     )
 
     raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
-    # A reply that is valid JSON with trailing prose, or that stopped early, is
-    # still worth reading rather than discarding into an unverified verdict.
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return json.loads(raw[start : end + 1])
-        except Exception:
-            pass
-    return {"errorStillVisible": None, "confidence": "low", "notes": raw[:200]}
+    verdict = _parse_verdict(raw)
+    if verdict.get("errorStillVisible") is None:
+        # Unreadable means "we do not know", and the caller turns that into an
+        # unverified fix. Print the whole reply and why it stopped, so the next
+        # occurrence is diagnosable instead of another silent refund.
+        print(
+            f"verify_fix: unreadable verdict (stop_reason="
+            f"{getattr(response, 'stop_reason', None)}): {raw!r}"
+        )
+    return verdict
 
 
 def _fix_long_shot_chunked(
