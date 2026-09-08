@@ -38,8 +38,104 @@ RUNWAY_BASE = "https://api.dev.runwayml.com"
 RUNWAY_VERSION = "2024-11-06"
 # gen4_aleph reached its sunset date on 2026-07-30 and now 400s on every
 # request. aleph2 is its replacement for /v1/video_to_video.
-RUNWAY_MODEL = "aleph2"
+RUNWAY_MODEL = "aleph2"  # default engine; see FIX_ENGINES
 RUNWAY_PROMPT_MAX = 1000  # aleph2 promptText maxLength
+
+
+# ── Fix engines ─────────────────────────────────────────────────────────────
+#
+# /v1/video_to_video fronts several models with incompatible request shapes,
+# limits and prices. Measured against the live API on 2026-09-08, on a 9.2s
+# portrait clip whose brief was "match the background environment across all
+# frames to a single consistent temple plaza layout":
+#
+#   aleph2              252 credits, ~2.5 min. Changed 5.8% of the image and
+#                       left the background inconsistent.
+#   gemini_omni_flash   101 credits, ~2 min. Unified the background across the
+#                       whole clip. Passed verification.
+#
+# Same clip, same instruction, 2.5x cheaper, and the only one that did the job.
+# So gemini_omni_flash is preferred wherever it fits, and it does not always
+# fit: it takes at most 10 seconds of input.
+#
+# `prompt_max` is the model's own promptText limit — exceeding it is a 400.
+# `min_dimension` is the shortest side the model will accept.
+FIX_ENGINES: dict[str, dict] = {
+    "aleph2": {
+        "model": "aleph2",
+        "max_input_s": 30.0,
+        "prompt_max": 1000,
+        "min_dimension": 0,
+        "credits_per_second": 28,
+        "label": "Aleph 2",
+    },
+    "gemini_omni_flash": {
+        "model": "gemini_omni_flash",
+        "max_input_s": 10.0,
+        "prompt_max": 3500,
+        "min_dimension": 0,
+        "credits_per_second": 11,
+        "label": "Gemini Omni Flash",
+    },
+    # Also passed the same test, but at 408 credits and ~25 minutes against
+    # gemini's 101 credits and ~2 minutes, for no measured quality advantage.
+    # Selectable, never auto-routed. It also refuses anything under 480p on its
+    # short side, which a portrait clip scaled into a 1280x720 box is not.
+    "seedance2_5": {
+        "model": "seedance2_5",
+        "max_input_s": 30.0,
+        "prompt_max": 15000,
+        "min_dimension": 480,
+        "credits_per_second": 45,
+        "label": "Seedance 2.5",
+    },
+}
+
+DEFAULT_ENGINE = "aleph2"
+
+
+def choose_engine(shot_dur: float, is_wholeclip: bool, override: str | None = None) -> str:
+    """
+    Which engine to run this fix on.
+
+    An explicit override wins, but only if it can actually take the clip — a
+    user picking a 10-second model for a 20-second shot must not turn into a
+    400 they cannot act on. Otherwise: whole-clip work goes to the cheapest
+    engine that fits, which is currently gemini_omni_flash under 10 seconds.
+
+    Bbox/marker work stays on aleph2 regardless. The red box burned into the
+    frame is an aleph2 behaviour we have evidence for; no other engine here has
+    been tested against it, and guessing with someone's credits is not on.
+    """
+    if override and override in FIX_ENGINES:
+        if shot_dur <= FIX_ENGINES[override]["max_input_s"]:
+            return override
+        print(
+            f"Engine override {override!r} cannot take a {shot_dur:.1f}s shot "
+            f"(max {FIX_ENGINES[override]['max_input_s']}s); using {DEFAULT_ENGINE}"
+        )
+        return DEFAULT_ENGINE
+
+    if is_wholeclip and shot_dur <= FIX_ENGINES["gemini_omni_flash"]["max_input_s"]:
+        return "gemini_omni_flash"
+    return DEFAULT_ENGINE
+
+
+def _build_payload(engine: str, clip_url: str, prompt: str) -> dict:
+    """Request body for one engine. The shapes genuinely differ."""
+    spec = FIX_ENGINES[engine]
+    text = prompt[: spec["prompt_max"]]
+    if engine.startswith("seedance"):
+        # seedance takes promptVideo rather than videoUri, and in edit mode it
+        # rejects both `ratio` and any explicit `duration`.
+        return {
+            "model": spec["model"],
+            "promptVideo": clip_url,
+            "promptText": text,
+            "mode": "edit",
+            "duration": "auto",
+        }
+    return {"model": spec["model"], "promptText": text, "videoUri": clip_url}
 
 
 def _public_url(bucket_name: str, storage_path: str) -> str:
@@ -58,6 +154,36 @@ def _probe_duration(video_path: str) -> float | None:
         return float(probe.stdout.strip())
     except (ValueError, AttributeError):
         return None
+
+
+def _fit_size(video_path: str, min_dimension: int) -> tuple[int, int] | None:
+    """
+    Output size that fits within TARGET_W x TARGET_H but keeps the short side
+    at or above `min_dimension`, preserving aspect and staying even.
+
+    Returns None when the source dimensions cannot be read, so the caller keeps
+    its default scaling rather than guessing.
+    """
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", video_path],
+        capture_output=True, text=True,
+    )
+    try:
+        sw, sh = (int(x) for x in probe.stdout.strip().split(",")[:2])
+    except (ValueError, AttributeError):
+        return None
+    if sw <= 0 or sh <= 0:
+        return None
+
+    scale = min(TARGET_W / sw, TARGET_H / sh)
+    w, h = sw * scale, sh * scale
+    if min(w, h) < min_dimension:
+        scale *= min_dimension / min(w, h)
+        w, h = sw * scale, sh * scale
+
+    even = lambda v: max(2, int(round(v / 2)) * 2)
+    return even(w), even(h)
 
 
 def _clip_window(video_path: str, start_ms: float, end_ms: float) -> tuple[float, float]:
@@ -102,6 +228,7 @@ def extract_clip(
     end_ms: float,
     out_path: str,
     pad_to_frame: bool = True,
+    min_dimension: int = 0,
 ) -> str:
     """
     Extract a 24fps clip for Aleph, at most TARGET_W x TARGET_H.
@@ -138,6 +265,19 @@ def extract_clip(
             f"scale=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=decrease:"
             f"force_divisible_by=2,fps=24"
         )
+        if min_dimension:
+            # Some engines refuse anything under a minimum short side —
+            # seedance2_5 rejects a portrait clip fitted into a 1280x720 box
+            # (404x720) as "must be at least 480p". Work out the real output
+            # size here rather than in an ffmpeg expression, so we only ever
+            # scale UP: a landscape clip already at 720 on its short side must
+            # not be dragged down to 480 to satisfy a minimum it already meets.
+            size = _fit_size(video_path, min_dimension)
+            if size is not None:
+                w, h = size
+                # setsar=1 matters: without it the display width came back one
+                # pixel under the minimum and was refused again.
+                vf = f"scale={w}:{h}:flags=lanczos,setsar=1,fps=24"
 
     result = subprocess.run(
         [
@@ -235,6 +375,7 @@ def runway_credit_balance() -> int | None:
 def apply_runway_fix(
     clip_public_url: str,
     prompt: str,
+    engine: str = DEFAULT_ENGINE,
 ) -> dict:
     """
     Submit clip to Runway aleph2. Returns {"url", "cost", "task_id"}.
@@ -290,13 +431,9 @@ def apply_runway_fix(
         "X-Runway-Version": RUNWAY_VERSION,
     }
 
-    payload: dict = {
-        "model": RUNWAY_MODEL,
-        "promptText": prompt[:RUNWAY_PROMPT_MAX],
-        "videoUri": clip_public_url,
-    }
+    payload = _build_payload(engine, clip_public_url, prompt)
 
-    print(f"Runway submit prompt: {prompt!r}")
+    print(f"Runway submit [{engine}] prompt: {prompt!r}")
     resp = requests.post(
         f"{RUNWAY_BASE}/v1/video_to_video",
         headers=headers,
@@ -332,8 +469,8 @@ def apply_runway_fix(
                 raise RuntimeError("Runway SUCCEEDED but returned no output URLs")
             # `cost` is only present on terminal tasks and is the actual charge.
             cost = _cost_credits(data)
-            print(f"Runway task {task_id} SUCCEEDED: cost={cost} credits")
-            return {"url": outputs[0], "cost": cost, "task_id": task_id}
+            print(f"Runway task {task_id} SUCCEEDED: cost={cost} credits [{engine}]")
+            return {"url": outputs[0], "cost": cost, "task_id": task_id, "engine": engine}
         if status in ("FAILED", "CANCELLED"):
             failure = data.get("failure") or data.get("failureCode") or ""
             raise RuntimeError(f"Runway task {task_id} {status}: {failure}")
@@ -573,6 +710,17 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
     is unreliable enough that crops can point at the wrong region and produce
     false 'fixed' verdicts.
 
+    The prompt asks for `observed` — a per-frame description — BEFORE any
+    verdict, and states that the original clip was not shown. Without that, the
+    prompt handed the model the original error description and asked "is it
+    still visible?", and the model restated the description instead of reading
+    the frames. Proven on a clip whose background had genuinely been unified:
+    the production prompt returned errorStillVisible true at high confidence
+    while reciting the original wording, and the same model on the same five
+    frames, asked neutrally, described the corrected background accurately and
+    called it consistent. That failure mode refunds users for fixes that
+    worked, and hides whether a model change helped.
+
     Returns {"errorStillVisible": bool|null, "confidence": str, "notes": str}.
     """
     import cv2
@@ -616,41 +764,47 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
 
     if is_add_mode:
         audit_text = (
-            f"You are auditing a video edit. The intended fix was to replace or add:\n"
-            f"  Target: {replace_with}\n"
-            f"  Original issue: {description}\n\n"
-            f"Scan all {len(frames)} frames above. The fix SUCCEEDED if the target "
-            f"({replace_with}) is now clearly visible and naturally placed in the scene — "
-            f"or if the corrected area matches the intended replacement.\n\n"
-            f"Question: did the fix fail — is the target STILL ABSENT or unchanged?\n\n"
+            f"You are auditing a video edit.\n\n"
+            f"FIRST, before judging anything, write `observed`: one short sentence per "
+            f"frame saying what you actually see in that frame. Describe only these "
+            f"{len(frames)} images. You have NOT been shown the original clip and you "
+            f"must not describe it or assume what it looked like.\n\n"
+            f"THEN judge, using only your own observations above.\n"
+            f"  The edit was supposed to achieve: {replace_with}\n\n"
+            f"Question: judged only from the frames above, did the edit fail to achieve "
+            f"that?\n\n"
             f"Strict rules:\n"
-            f"- If the target is now clearly present or applied in at least some frames → errorStillVisible: false (fix succeeded).\n"
-            f"- If the target is absent, only a ghost, or the area is unchanged → errorStillVisible: true (fix failed).\n"
-            f"- If unsure, lean toward false (benefit of the doubt for a successful replacement).\n\n"
-            f'Return STRICT JSON only: {{"errorStillVisible": true|false, '
-            f'"confidence": "low|medium|high", "notes": "one sentence — name the '
-            f'frame(s) and exactly what you see or do not see"}}'
+            f"- Achieved in at least some frames → errorStillVisible: false (succeeded).\n"
+            f"- Plainly not achieved → errorStillVisible: true (failed).\n"
+            f"- If your own `observed` notes do not support a verdict, say confidence low.\n"
+            f"- Never restate a problem you did not observe in these frames.\n\n"
+            f'Return STRICT JSON only: {{"observed": ["frame 1: …", "frame 2: …", …], '
+            f'"errorStillVisible": true|false, "confidence": "low|medium|high", '
+            f'"notes": "one sentence grounded in your observations"}}'
         )
     else:
         audit_text = (
-            f"You are auditing a video edit. The ORIGINAL error was:\n"
-            f"  Description: {description}\n"
+            f"You are auditing a video edit, which was meant to REMOVE something.\n\n"
+            f"FIRST, before judging anything, write `observed`: one short sentence per "
+            f"frame saying what you actually see in that frame. Describe only these "
+            f"{len(frames)} images. You have NOT been shown the original clip and you "
+            f"must not describe it or assume what it looked like.\n\n"
+            f"THEN judge, using only your own observations above.\n"
+            f"  What should no longer be present: {description}\n"
             f"  Type: {err_type}\n\n"
-            f"Scan all {len(frames)} frames above CAREFULLY. The error may be small "
-            f"(less than 5% of the frame), partially occluded, or in shadow. "
-            f"Look at every part of every frame, especially tables, hands, and "
-            f"foreground surfaces.\n\n"
-            f"Question: is the described error still visible in ANY frame?\n\n"
+            f"It may be small (under 5% of the frame), partly occluded, or in shadow, "
+            f"so look at every part of every frame.\n\n"
+            f"Question: judged only from the frames above, is it still present in ANY "
+            f"frame?\n\n"
             f"Strict rules:\n"
-            f"- Even partial visibility, faint outlines, distortion artifacts, "
-            f"or a clearly modern stand-in (e.g. a paper cup replaced with a "
-            f"goblet would still count) → errorStillVisible: true.\n"
-            f"- If you see ANY object on the table or in the scene that fits the "
-            f"original description in ANY frame → true.\n"
-            f"- If unsure, return true. False negatives are worse than false positives.\n\n"
-            f'Return STRICT JSON only: {{"errorStillVisible": true|false, '
-            f'"confidence": "low|medium|high", "notes": "one sentence — name the '
-            f'frame(s) and exactly what you see or do not see"}}'
+            f"- Present anywhere, even partially, as a faint outline, a distortion "
+            f"artifact, or an obvious stand-in → errorStillVisible: true.\n"
+            f"- Absent from every frame → errorStillVisible: false.\n"
+            f"- Never restate a problem you did not observe in these frames. If your own "
+            f"`observed` notes do not mention it, you did not see it.\n\n"
+            f'Return STRICT JSON only: {{"observed": ["frame 1: …", "frame 2: …", …], '
+            f'"errorStillVisible": true|false, "confidence": "low|medium|high", '
+            f'"notes": "one sentence grounded in your observations"}}'
         )
 
     content.append({"type": "text", "text": audit_text})
@@ -658,7 +812,11 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     response = client.messages.create(
         model="claude-opus-4-8",
-        max_tokens=512,
+        # The reply now carries a per-frame `observed` list before the verdict,
+        # which does not fit in 512. A truncated reply fails json.loads, returns
+        # errorStillVisible None, and None is not False — so the fix is recorded
+        # unverified and refunded. Truncation must never be able to mean failure.
+        max_tokens=1500,
         messages=[{"role": "user", "content": content}],
     )
 
@@ -671,7 +829,17 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
     try:
         return json.loads(raw)
     except Exception:
-        return {"errorStillVisible": None, "confidence": "low", "notes": raw[:200]}
+        pass
+    # A reply that is valid JSON with trailing prose, or that stopped early, is
+    # still worth reading rather than discarding into an unverified verdict.
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(raw[start : end + 1])
+        except Exception:
+            pass
+    return {"errorStillVisible": None, "confidence": "low", "notes": raw[:200]}
 
 
 def _fix_long_shot_chunked(
@@ -684,6 +852,7 @@ def _fix_long_shot_chunked(
     prompt: str,
     bucket,
     tmp: str,
+    engine: str = DEFAULT_ENGINE,
 ) -> tuple[str, float | None]:
     """
     Fix a shot longer than MAX_CLIP_DURATION by splitting into ≤5s chunks,
@@ -724,7 +893,7 @@ def _fix_long_shot_chunked(
         chunk_public_url = _public_url(bucket.name, chunk_storage)
 
         print(f"  Chunk {i+1}/{n_chunks}: sending to Runway…")
-        rw = apply_runway_fix(chunk_public_url, prompt)
+        rw = apply_runway_fix(chunk_public_url, prompt, engine=engine)
         runway_url = rw["url"]
         if rw.get("cost") is None:
             cost_known = False
@@ -831,6 +1000,16 @@ def fix_single_error(job_id: str, error_id: str) -> None:
 
             # Extract shot clip. For in-video marker mode, burn the red box
             # into every frame — strongest possible signal for Aleph.
+            # The engine is picked BEFORE the clip is cut, because it decides
+            # the size: seedance2_5 refuses anything under 480p on its short
+            # side, and a portrait shot fitted into a 1280x720 box is 404x720.
+            # `fixEngine` lets a retry run the same error on a different model
+            # instead of repeating the one that already failed; unset on a first
+            # attempt, which routes automatically.
+            shot_dur = (fix_shot["endMs"] - fix_shot["startMs"]) / 1000.0
+            engine = choose_engine(shot_dur, is_wholeclip_type, error.get("fixEngine"))
+            print(f"Fix engine for {error_id}: {engine} (shot {shot_dur:.2f}s)")
+
             clip_local = os.path.join(tmp, f"clip_{error_id}.mp4")
             # The same window the extract helpers will compute. Captured here,
             # while the downloaded source still exists, because restitch needs
@@ -864,6 +1043,7 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     # No bbox on this path, so nothing depends on the padded
                     # frame — and the black bars would be outpainted.
                     pad_to_frame=not is_wholeclip_type,
+                    min_dimension=FIX_ENGINES[engine]["min_dimension"],
                 )
 
             # Upload input clip to Firebase so Runway can fetch it via public URL
@@ -992,7 +1172,6 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                 has_marker=False,
                 in_video_marker=in_video_marker,
             )
-            shot_dur = (fix_shot["endMs"] - fix_shot["startMs"]) / 1000.0
             fixed_local = os.path.join(tmp, f"clip_{error_id}_fixed.mp4")
 
             runway_cost: float | None = None
@@ -1003,6 +1182,7 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                 chunked_path, runway_cost = _fix_long_shot_chunked(
                     job_id=job_id,
                     error_id=error_id,
+                    engine=engine,
                     fix_shot=fix_shot,
                     video_local=video_local,
                     target_bboxes=target_bboxes,
@@ -1015,7 +1195,7 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                 shutil.copy2(chunked_path, fixed_local)
             else:
                 # Short shot (≤5s): single Runway call
-                result = apply_runway_fix(clip_public_url, prompt)
+                result = apply_runway_fix(clip_public_url, prompt, engine=engine)
                 runway_url = result["url"]
                 runway_cost = result.get("cost")
                 runway_task_id = result.get("task_id")
@@ -1049,7 +1229,8 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             # Recorded per error so cost-per-fix can be rebuilt from Firestore
             # even if telemetry is lost, and so credits charged to the user can
             # be reconciled against credits actually burned.
-            "runwayModel": RUNWAY_MODEL,
+            "runwayModel": FIX_ENGINES[engine]["model"],
+            "fixEngineUsed": engine,
             "runwayCreditsCharged": runway_cost,
             "runwayTaskId": runway_task_id,
             "shotDurationSeconds": round(shot_dur, 3),
@@ -1077,7 +1258,10 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                 {
                     "error_id": error_id,
                     "error_type": error.get("type"),
-                    "runway_model": RUNWAY_MODEL,
+                    "runway_model": FIX_ENGINES[engine]["model"],
+                    # Which engine actually ran, so cost-per-verified-fix can be
+                    # compared per engine instead of argued about.
+                    "fix_engine": engine,
                     "runway_credits_charged": runway_cost,
                     "runway_task_id": runway_task_id,
                     "shot_duration_seconds": round(shot_dur, 3),
@@ -1136,7 +1320,11 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     "error_id": error_id,
                     "error_type": error.get("type"),
                     "error_message": str(e)[:300],
-                    "runway_model": RUNWAY_MODEL,
+                    # locals() because the failure may predate engine selection.
+                    "fix_engine": locals().get("engine"),
+                    "runway_model": FIX_ENGINES.get(
+                        locals().get("engine") or DEFAULT_ENGINE, {}
+                    ).get("model"),
                     "retry_count": error.get("retryCount", 0),
                 },
             )
