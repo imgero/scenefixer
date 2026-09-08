@@ -56,6 +56,11 @@ export async function POST(req: NextRequest) {
       line_items: [{ price: pack.priceId, quantity: 1 }],
       success_url: `${appUrl}/pricing?success=credits&credits=${pack.credits}`,
       cancel_url:  `${appUrl}/pricing?cancelled=1`,
+      // Second, independent carrier of the uid. metadata is easy to lose —
+      // any session Stripe creates outside this route (a Payment Link, the
+      // hosted pricing table, a dashboard-created session) arrives with none —
+      // and the webhook then has nothing to key the entitlement write on.
+      client_reference_id: uid,
       metadata: { uid, type: "credits", quantity: String(pack.credits) },
     });
     return NextResponse.json({ url: session.url });
@@ -78,6 +83,7 @@ export async function POST(req: NextRequest) {
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: `${appUrl}/pricing?success=1`,
     cancel_url:  `${appUrl}/pricing?cancelled=1`,
+    client_reference_id: uid,
     metadata: { uid, plan },
     subscription_data: { metadata: { uid, plan } },
   });
