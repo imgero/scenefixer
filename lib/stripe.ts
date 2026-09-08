@@ -31,6 +31,22 @@ export const CREDIT_PACKS: { pack: string; credits: number; price: number; label
   { pack: "100", credits: 240, price: 100, label: "save ~20%",  priceId: process.env.STRIPE_PRICE_CREDIT_100 ?? "" },
 ];
 
+/**
+ * Every price id this product sells, subscriptions and credit packs alike.
+ *
+ * Scene Fixer shares a Stripe account with other businesses, so the webhook
+ * endpoint receives their events too. A $2,000 consulting invoice on
+ * 31 August 2026 arrived as a live `checkout.session.completed` with no
+ * metadata and no customer, was logged as `entitlement_write_failed`, and was
+ * read as a Scene Fixer customer who had paid and got nothing. It was not one.
+ * This is how the webhook tells its own sales from everyone else's.
+ */
+export function isOurPriceId(priceId: string | null | undefined): boolean {
+  if (!priceId) return false;
+  if (planFromPriceId(priceId)) return true;
+  return CREDIT_PACKS.some((p) => p.priceId && p.priceId === priceId);
+}
+
 export function planFromPriceId(priceId: string): Plan | null {
   for (const [plan, prices] of Object.entries(STRIPE_PRICES)) {
     if (prices.monthly === priceId || prices.annual === priceId) {

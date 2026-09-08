@@ -2,7 +2,7 @@ import { after } from "next/server";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb, adminAuth } from "@/lib/firebase-admin";
 import { triggerProcessJob } from "@/lib/modal";
-import { getPostHogClient } from "@/lib/posthog-server";
+import { captureServer } from "@/lib/posthog-server";
 import { ensureEntitlement } from "@/lib/entitlements";
 
 const FREE_SCANS_PER_DAY = 3;
@@ -82,7 +82,10 @@ export async function POST(
       status: "decomposing",
     });
 
-    getPostHogClient().capture({
+    // capture() alone only queues; the POST that ships it is not awaited, so a
+    // frozen instance loses the event. captureServer flushes before resolving
+    // and stamps the event at capture time rather than at ingestion.
+    await captureServer({
       distinctId: uid ?? `beta_${betaToken?.slice(0, 8)}`,
       event: "job_analysis_started",
       properties: { job_id: jobId, is_beta: !uid },

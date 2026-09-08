@@ -60,14 +60,24 @@ export default function JobPage({ params }: Props) {
   // Live-sync user plan + quota
   useEffect(() => {
     if (!user) return;
-    const unsub = onSnapshot(doc(db, "users", user.uid), (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        setUserPlan((data.plan as Plan) ?? "free");
-        setFixesUsed(data.creditsUsedThisMonth ?? 0);
-        setCreditsBalance(data.creditsBalance ?? 0);
-      }
-    });
+    const unsub = onSnapshot(
+      doc(db, "users", user.uid),
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          setUserPlan((data.plan as Plan) ?? "free");
+          setFixesUsed(data.creditsUsedThisMonth ?? 0);
+          setCreditsBalance(data.creditsBalance ?? 0);
+        }
+      },
+      (err) =>
+        posthog.capture("firestore_listen_failed", {
+          listener: "user_entitlement",
+          job_id: jobId,
+          code: err.code,
+          message: err.message,
+        })
+    );
     return unsub;
   }, [user]);
 
@@ -108,7 +118,16 @@ export default function JobPage({ params }: Props) {
     for (const err of stuckErrors) {
       batch.update(doc(db, "jobs", jobId, "errors", err.id), { fixStatus: "pending" });
     }
-    batch.commit().catch((e) => console.error("Failed to reset stuck errors:", e));
+    batch.commit().catch((e) => {
+      console.error("Failed to reset stuck errors:", e);
+      posthog.capture("firestore_write_failed", {
+        operation: "reset_stuck_errors",
+        job_id: jobId,
+        count: stuckErrors.length,
+        code: (e as { code?: string }).code ?? null,
+        message: (e as Error).message,
+      });
+    });
   }, [job?.status, errors, jobId]);
 
   // Subscribe to shots subcollection
@@ -117,9 +136,19 @@ export default function JobPage({ params }: Props) {
       collection(db, "jobs", jobId, "shots"),
       orderBy("index", "asc")
     );
-    const unsub = onSnapshot(q, (snap) => {
-      setShots(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Shot));
-    });
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        setShots(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Shot));
+      },
+      (err) =>
+        posthog.capture("firestore_listen_failed", {
+          listener: "job_shots",
+          job_id: jobId,
+          code: err.code,
+          message: err.message,
+        })
+    );
     return unsub;
   }, [jobId]);
 
@@ -133,6 +162,9 @@ export default function JobPage({ params }: Props) {
     job.status === "fixing" &&
     typeof job.fixingStartedAt === "number" &&
     Date.now() - job.fixingStartedAt > FIXING_TIMEOUT_MS;
+
+  const showScoreAfter =
+    job?.scoreAfter !== undefined && job?.verificationPassed !== false;
 
   const monthlyLimit = PLAN_LIMITS[userPlan].creditsPerMonth;
   const quotaExhausted = user ? (fixesUsed >= monthlyLimit && creditsBalance <= 0) : false;
@@ -279,14 +311,21 @@ export default function JobPage({ params }: Props) {
           <span className="text-gray-400 font-mono text-base">{jobId}</span>
         </h1>
 
-        {/* Score badges */}
-        {(job.scoreBefore !== undefined || job.scoreAfter !== undefined) && (
+        {/* Score badges.
+            The "after" score comes from re-running detection on the output
+            video, which is a different check from the per-error verification
+            that decides whether a fix actually landed. When they disagree the
+            per-error check wins: a run whose every fix came back unverified
+            and refunded must not be crowned with a perfect "after" score.
+            Two jobs shipped exactly that — 84 → 100 and 92 → 100 — beside a
+            full refund. */}
+        {(job.scoreBefore !== undefined || showScoreAfter) && (
           <div className="flex gap-4 mt-4">
             {job.scoreBefore !== undefined && (
               <ScoreBadge score={job.scoreBefore} label="before" />
             )}
-            {job.scoreAfter !== undefined && (
-              <ScoreBadge score={job.scoreAfter} label="after" />
+            {showScoreAfter && (
+              <ScoreBadge score={job.scoreAfter!} label="after" />
             )}
           </div>
         )}

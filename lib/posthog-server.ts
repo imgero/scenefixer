@@ -34,7 +34,13 @@ type CaptureArgs = Parameters<PostHog["capture"]>[0];
 export async function captureServer(payload: CaptureArgs): Promise<void> {
   try {
     const client = getPostHogClient();
-    client.capture(payload);
+    // Stamp the event at the moment it happened. Without an explicit timestamp
+    // PostHog dates the event when its ingestion pipeline receives it, and that
+    // lag is variable — 0.2s to 5s in production. Two events captured seconds
+    // apart could land milliseconds apart, and one captured first could land
+    // second. Every "this event double-fired" and "these two fired 21ms apart"
+    // reading of the server-side stream was that lag, not the application.
+    client.capture({ timestamp: new Date(), ...payload });
     await client.flush();
   } catch (err) {
     console.error(

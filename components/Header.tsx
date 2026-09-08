@@ -3,28 +3,30 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/hooks/useAuth";
 import { PLAN_LIMITS, type Plan } from "@/lib/types";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
 
-function startOfMonth(date: Date): number {
-  return new Date(date.getFullYear(), date.getMonth(), 1).getTime();
-}
-
-async function ensureUserDoc(uid: string, email: string) {
-  const ref = doc(db, "users", uid);
-  const snap = await getDoc(ref);
-  const data = snap.exists() ? snap.data() : {};
-  await setDoc(ref, {
-    uid, email,
-    plan: data.plan ?? "free",
-    creditsUsedThisMonth: data.creditsUsedThisMonth ?? 0,
-    monthResetAt: data.monthResetAt ?? startOfMonth(new Date()),
-    createdAt: data.createdAt ?? Date.now(),
-  }, { merge: true });
+/**
+ * Record the signed-in identity on the user document.
+ *
+ * Deliberately writes nothing but identity. This used to also write `plan`,
+ * `creditsUsedThisMonth` and `monthResetAt` from the browser — all three are
+ * entitlement fields the security rules forbid the client to touch, so the
+ * write was rejected on every sign-in where any of them differed from what the
+ * server had (and on every first sign-in, where the document does not exist
+ * yet and the update rule has no `resource` to diff against). The rejection
+ * surfaced as an unhandled `FirebaseError: Missing or insufficient
+ * permissions`.
+ *
+ * The full entitlement shape is the server's job: `ensureEntitlement` creates
+ * and backfills it on the first scan or fix. The client must not guess at it.
+ */
+async function ensureUserIdentity(uid: string, email: string) {
+  await setDoc(doc(db, "users", uid), { uid, email }, { merge: true });
 }
 
 const PLAN_BADGE: Record<Plan, { label: string; className: string }> = {
@@ -82,7 +84,7 @@ export default function Header() {
       if (getAdditionalUserInfo(result)?.isNewUser && result.user.email) {
         registerLoopsContact(result.user.email, result.user.uid);
       }
-      await ensureUserDoc(result.user.uid, result.user.email ?? "");
+      await ensureUserIdentity(result.user.uid, result.user.email ?? "");
     } catch (err) {
       console.error("Sign-in error:", err);
     } finally {

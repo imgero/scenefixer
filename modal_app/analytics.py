@@ -8,6 +8,7 @@ best-effort: telemetry must never be able to fail a job.
 
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 # job_id -> monotonic start. The timer is started once per process_job
@@ -97,6 +98,12 @@ def capture(
             distinct_id=_distinct_id(job),
             event=event,
             properties=props,
+            # Without an explicit timestamp PostHog dates the event when its
+            # ingestion pipeline receives it. That lag is variable, so events
+            # captured seconds apart can land milliseconds apart and out of
+            # order — which is what made unrelated server-side events read as
+            # double-fires. Stamp at capture time instead.
+            timestamp=datetime.now(timezone.utc),
         )
         client.flush()
     except Exception as exc:
