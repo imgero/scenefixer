@@ -46,6 +46,16 @@ export const MONTHLY_SPEND_CEILING: Record<Plan, number> = {
 export const UNVERIFIED_MONTHLY_CREDITS = 0;
 
 /**
+ * How long an "undeliverable" verdict stands before it is re-checked.
+ *
+ * Deliverability is cached to keep a DNS lookup off every fix request. Caching
+ * a negative forever turns one DNS answer — including one taken during a
+ * resolver outage that happened to return NXDOMAIN — into a permanent, silent
+ * lockout that the user cannot clear by any action available to them.
+ */
+export const RECHECK_UNDELIVERABLE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Whether an address's domain can receive mail at all.
  *
  * Google OAuth is the only signup path, so Firebase always reports
@@ -158,12 +168,35 @@ export async function ensureEntitlement(
 
   // Cached on the user document — a DNS lookup per fix request is wasteful, and
   // a domain lapsing mid-month is rare enough to catch on the next signup.
+  //
+  // A NEGATIVE verdict is re-checked after RECHECK_UNDELIVERABLE_AFTER_MS. A
+  // "true" caches forever because a domain that resolves today is not going to
+  // start being a mistake; a "false" is a permanent lockout on the strength of
+  // one DNS answer, with no way for the user to get out of it and no way for
+  // us to notice a domain that has since come back. One account sat behind this
+  // gate on 26 August, clicked through to the billing portal, rage-clicked, and
+  // was still refused.
   const email = (merged.email as string | null) ?? null;
   let emailDeliverable = merged.emailDeliverable as boolean | undefined;
-  if (emailDeliverable === undefined && email) {
+  const checkedAt = (merged.emailCheckedAt as number | undefined) ?? 0;
+  const staleNegative =
+    emailDeliverable === false &&
+    Date.now() - checkedAt > RECHECK_UNDELIVERABLE_AFTER_MS;
+  if (email && (emailDeliverable === undefined || staleNegative)) {
     emailDeliverable = await isDeliverableDomain(email);
     await ref.set({ emailDeliverable, emailCheckedAt: Date.now() }, { merge: true });
   }
+
+  // An account that has actually paid is never gated on deliverability. The
+  // gate exists to stop unlimited free accounts on unreachable domains draining
+  // the prepaid pool; it has no business standing between a paying customer and
+  // what they bought. Note this keys on a paid plan or purchased credits, NOT on
+  // the presence of a Stripe customer record — a customer record is created the
+  // moment anyone clicks Upgrade, long before any money moves.
+  const hasPaid =
+    ((merged.plan as Plan) ?? "free") !== "free" ||
+    ((merged.creditsBalance as number) ?? 0) > 0;
+  if (hasPaid) emailDeliverable = true;
 
   const storedResetAt = (merged.monthResetAt as number) ?? monthStart;
   const monthRolledOver = storedResetAt < monthStart;

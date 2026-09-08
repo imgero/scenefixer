@@ -47,10 +47,30 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
-      allow write: if request.auth != null
+
+      // `fixesUsedThisMonth` was renamed to `creditsUsedThisMonth` in the
+      // application but not here, so the guard has been protecting a field
+      // that no longer exists while the live monthly-usage counter — the one
+      // the fix route's quota and ceiling checks both read — was left
+      // client-writable. A signed-in user could reset their own usage to zero
+      // from the browser and keep spending against the prepaid Runway pool.
+      //
+      // `emailDeliverable` and `emailVerified` are here for the same reason:
+      // they gate whether an account may spend at all, so they must only ever
+      // be written by the server.
+      allow create: if request.auth != null
+        && request.auth.uid == uid
+        && !request.resource.data.keys()
+            .hasAny(['plan', 'creditsUsedThisMonth', 'monthResetAt', 'stripeCustomerId',
+                     'creditsBalance', 'emailDeliverable', 'emailVerified',
+                     'scansToday', 'scanDate']);
+      allow update: if request.auth != null
         && request.auth.uid == uid
         && !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny(['plan', 'fixesUsedThisMonth', 'monthResetAt', 'stripeCustomerId', 'creditsBalance']);
+            .hasAny(['plan', 'creditsUsedThisMonth', 'monthResetAt', 'stripeCustomerId',
+                     'creditsBalance', 'emailDeliverable', 'emailVerified',
+                     'scansToday', 'scanDate']);
+      allow delete: if false;
     }
 
     match /cache/{cacheId} {
