@@ -157,6 +157,20 @@ def _probe_duration(video_path: str) -> float | None:
         return None
 
 
+def _probe_dimensions(video_path: str) -> tuple[int, int] | None:
+    """(width, height) of a local video, or None if ffprobe cannot say."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", video_path],
+        capture_output=True, text=True,
+    )
+    try:
+        w, h = (int(x) for x in probe.stdout.strip().split(",")[:2])
+        return (w, h) if w > 0 and h > 0 else None
+    except (ValueError, AttributeError):
+        return None
+
+
 def _fit_size(video_path: str, min_dimension: int) -> tuple[int, int] | None:
     """
     Output size that fits within TARGET_W x TARGET_H but keeps the short side
@@ -901,6 +915,35 @@ def _crossfade_concat(paths: list[str], out_path: str, tmp: str) -> bool:
         if d is None or d <= CHUNK_CROSSFADE_S * 2:
             return False
         durs.append(d)
+
+    # Chunks do not necessarily come back the same shape. gemini_omni_flash
+    # picks its own output aspect per generation, so a portrait shot split in
+    # two returned one pillarboxed 16:9 piece and one full-width piece, and
+    # joining them produced a video that visibly changes format halfway
+    # through — the "cut and pasted" seam. Every piece is conformed to the
+    # first piece's geometry before any of them are joined.
+    target = _probe_dimensions(paths[0])
+    if target is None:
+        return False
+    tw, th = target
+    scaled: list[str] = []
+    for i, p in enumerate(paths):
+        if _probe_dimensions(p) == target:
+            scaled.append(p)
+            continue
+        conformed = os.path.join(tmp, f"conform_{i}.mp4")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-i", p, "-vf",
+             f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+             f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
+             "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-an", conformed],
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            print(f"  chunk conform failed: {r.stderr.decode(errors='replace')[-300:]}")
+            return False
+        scaled.append(conformed)
+    paths = scaled
 
     inputs: list[str] = []
     for p in paths:

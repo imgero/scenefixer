@@ -52,8 +52,50 @@ def transcode_to_720p(input_path: str, output_path: str) -> str:
     return output_path
 
 
+def transcode_for_detection(input_path: str, output_path: str) -> str:
+    """
+    A 720p copy with NO letterboxing, used only to find shot boundaries.
+
+    Scene detection compares consecutive frames across the whole frame. On a
+    portrait video padded into a 16:9 box, roughly two thirds of every frame is
+    identical black, so every real cut's score is divided by three and lands
+    under the threshold. Measured on a live user's 12.63s clip, same detector,
+    same threshold: 6 scenes at its native 410x720, and ZERO once padded to
+    1280x720.
+
+    The effect is that portrait uploads — most short-form AI video — were being
+    analysed as one enormous shot containing many undetected cuts. Detection
+    then reported the cuts as "the background environment shifts across frames",
+    the fix asked a model to merge several different scenes into one, which
+    cannot be done, and the verifier correctly rejected the result. A large part
+    of the unfixable-error problem is this one line of ffmpeg.
+
+    Boundaries found here are timestamps, so they apply unchanged to the padded
+    transcode that everything downstream uses.
+    """
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf",
+            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "libx264", "-crf", "23",
+            "-an",
+            output_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return output_path
+
+
 def detect_shots(video_path: str) -> list[dict]:
-    """Run PySceneDetect ContentDetector and return shot boundaries in ms."""
+    """
+    Run PySceneDetect ContentDetector and return shot boundaries in ms.
+
+    Must be given an UNPADDED video — see transcode_for_detection. Letterboxing
+    dilutes every content delta and suppresses detection entirely on portrait
+    footage.
+    """
     video = open_video(video_path)
     manager = SceneManager()
     manager.add_detector(ContentDetector(threshold=27.0))
@@ -225,7 +267,16 @@ def run_decompose(job_id: str) -> int:
         transcode_to_720p(raw_path, norm_path)
 
         # 3. Detect shots
-        shots = detect_shots(norm_path)
+        # Detect on an unpadded copy. norm_path is letterboxed, and letterboxing
+        # hides cuts (see transcode_for_detection). The boundaries are
+        # timestamps, so they apply to norm_path unchanged.
+        det_path = os.path.join(tmp, "detect_source.mp4")
+        try:
+            transcode_for_detection(raw_path, det_path)
+            shots = detect_shots(det_path)
+        except Exception as exc:
+            print(f"Unpadded detection failed ({exc}); falling back to the padded copy")
+            shots = detect_shots(norm_path)
 
         # 4. For each shot: extract 3 keyframes (25/50/75%), upload all,
         # write Firestore doc with array + mid-frame for backward-compat.

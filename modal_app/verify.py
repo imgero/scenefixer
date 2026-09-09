@@ -7,7 +7,14 @@ Re-runs decompose + detect on the output video, writing to a separate
 from datetime import datetime, timezone
 
 from modal_app.firebase import get_db
-from modal_app.decompose import download_video, transcode_to_720p, detect_shots, extract_keyframe, upload_keyframe
+from modal_app.decompose import (
+    download_video,
+    transcode_to_720p,
+    transcode_for_detection,
+    detect_shots,
+    extract_keyframe,
+    upload_keyframe,
+)
 from modal_app.detect import get_pairs_to_compare, compare_pair
 from modal_app.prompts import compute_continuity_score
 import os
@@ -27,7 +34,16 @@ def run_verify(job_id: str) -> dict:
         norm_path = os.path.join(tmp, "normalized_output.mp4")
         transcode_to_720p(raw_path, norm_path)
 
-        shots = detect_shots(norm_path)
+        # Unpadded, for the same reason as decompose: letterboxing hides cuts,
+        # and a verify pass that sees one shot where there are six scores the
+        # output against the wrong structure.
+        det_path = os.path.join(tmp, "verify_detect_source.mp4")
+        try:
+            transcode_for_detection(raw_path, det_path)
+            shots = detect_shots(det_path)
+        except Exception as exc:
+            print(f"Unpadded detection failed ({exc}); falling back to the padded copy")
+            shots = detect_shots(norm_path)
 
         # Upload keyframes for output shots (stored under verify_shots)
         verify_shots = []
