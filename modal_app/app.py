@@ -100,26 +100,32 @@ def _refund_daily_scan(owner_uid: str | None) -> bool:
     return False
 
 
-@app.function(
-    image=image,
+ANALYSIS_SECRETS = [
+    modal.Secret.from_name("firebase-admin-key"),
+    modal.Secret.from_name("anthropic-api-key"),
+    modal.Secret.from_name("modal-bearer-token"),
+    modal.Secret.from_name("replicate-api-token"),
+    modal.Secret.from_name("posthog-api-key"),
+]
 
-    secrets=[
-        modal.Secret.from_name("firebase-admin-key"),
-        modal.Secret.from_name("anthropic-api-key"),
-        modal.Secret.from_name("modal-bearer-token"),
-        modal.Secret.from_name("replicate-api-token"),
-        modal.Secret.from_name("posthog-api-key"),
-    ],
-    timeout=600,
-    min_containers=0,
-)
-@modal.fastapi_endpoint(method="POST")
-async def process_job(body: dict, _: None = Depends(_verify_token)):
-    """Decompose → Detect. Called by /api/jobs/[id]/start."""
-    job_id = body.get("jobId")
-    if not job_id:
-        raise HTTPException(status_code=400, detail="jobId required")
 
+@app.function(image=image, secrets=ANALYSIS_SECRETS, timeout=7200, min_containers=0)
+def run_process_job(job_id: str):
+    """
+    Decompose → Detect. A plain function, not a web endpoint, so it can be
+    spawned detached and survive its caller going away.
+
+    This is the same split fix_phase already had, applied here for the same
+    reason. Analysis used to run inline inside the web endpoint, which capped
+    it at that endpoint's 600s timeout and — worse — cancelled it outright
+    whenever the caller disconnected, which Vercel's after() does at 300s.
+
+    It survived only because analysis was short. Once shot detection stopped
+    being blinded by letterboxing, a 23-second video went from 2 shots to 10,
+    detection went from 3 comparisons to 55, and analysis stopped being able to
+    finish at all. Correct shot splitting is what made this limit reachable;
+    it was always there.
+    """
     from modal_app import analytics
 
     analytics.start_timer(job_id)
@@ -178,7 +184,9 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
             },
             job=current,
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        # Detached: there is no caller to receive an HTTP error. The job
+        # document already carries the failure, which is what the UI reads.
+        raise
 
 
 FIX_SECRETS = [
@@ -377,6 +385,24 @@ def run_fix_phase(job_id: str):
                 "errorMessage": str(e),
             })
         raise
+
+
+@app.function(image=image, secrets=ANALYSIS_SECRETS, timeout=60, min_containers=0)
+@modal.fastapi_endpoint(method="POST")
+async def process_job(body: dict, _: None = Depends(_verify_token)):
+    """
+    Accept an analysis request and hand it to a detached worker.
+
+    Returns immediately, for the same reason fix_phase does: the caller must
+    not hold a connection open for the duration, because that connection dying
+    is what cancels the work.
+    """
+    job_id = body.get("jobId")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="jobId required")
+
+    call = run_process_job.spawn(job_id)
+    return {"ok": True, "spawned": True, "callId": call.object_id}
 
 
 @app.function(image=image, secrets=FIX_SECRETS, timeout=60, min_containers=0)
