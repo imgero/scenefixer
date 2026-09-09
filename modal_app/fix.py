@@ -108,16 +108,16 @@ def choose_engine(shot_dur: float, is_wholeclip: bool, override: str | None = No
     frame is an aleph2 behaviour we have evidence for; no other engine here has
     been tested against it, and guessing with someone's credits is not on.
     """
+    # Any engine can take any length now — a shot longer than the engine's own
+    # input limit is split and rejoined by _fix_long_shot_chunked.
     if override and override in FIX_ENGINES:
-        if shot_dur <= FIX_ENGINES[override]["max_input_s"]:
-            return override
-        print(
-            f"Engine override {override!r} cannot take a {shot_dur:.1f}s shot "
-            f"(max {FIX_ENGINES[override]['max_input_s']}s); using {DEFAULT_ENGINE}"
-        )
-        return DEFAULT_ENGINE
+        return override
 
-    if is_wholeclip and shot_dur <= FIX_ENGINES["gemini_omni_flash"]["max_input_s"]:
+    # Whole-clip work always goes to gemini_omni_flash now: it is the only
+    # engine measured to actually repair a clip, it costs 2.5x less, and
+    # chunking removes the 10-second input limit that used to send most real
+    # footage to aleph2 instead.
+    if is_wholeclip:
         return "gemini_omni_flash"
     return DEFAULT_ENGINE
 
@@ -883,6 +883,57 @@ def verify_fix(fixed_clip_path: str, error: dict) -> dict:
     return verdict
 
 
+CHUNK_CROSSFADE_S = 0.25  # dissolve across a chunk join to hide a grade step
+
+
+def _crossfade_concat(paths: list[str], out_path: str, tmp: str) -> bool:
+    """
+    Join clips with a short dissolve at each seam. Returns False if ffmpeg
+    refuses, so the caller can fall back to a hard cut rather than lose the fix.
+
+    Each piece came back from a separate generation, so the join is where a
+    difference in grade or exposure shows as a step. A quarter-second dissolve
+    hides that. It cannot hide the pieces disagreeing about what is in frame.
+    """
+    durs = []
+    for p in paths:
+        d = _probe_duration(p)
+        if d is None or d <= CHUNK_CROSSFADE_S * 2:
+            return False
+        durs.append(d)
+
+    inputs: list[str] = []
+    for p in paths:
+        inputs += ["-i", p]
+
+    # xfade offsets are cumulative and each transition eats CHUNK_CROSSFADE_S
+    # of total length, so the offset for join i has to subtract every earlier
+    # overlap or the tail of the video is silently dropped.
+    steps: list[str] = []
+    prev = "[0:v]"
+    elapsed = durs[0]
+    for i in range(1, len(paths)):
+        offset = elapsed - CHUNK_CROSSFADE_S
+        label = f"[x{i}]"
+        steps.append(
+            f"{prev}[{i}:v]xfade=transition=fade:"
+            f"duration={CHUNK_CROSSFADE_S}:offset={offset:.3f}{label}"
+        )
+        prev = label
+        elapsed = offset + durs[i]
+
+    result = subprocess.run(
+        ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(steps),
+         "-map", prev, "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+         "-an", out_path],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print(f"  xfade failed: {result.stderr.decode(errors='replace')[-400:]}")
+        return False
+    return True
+
+
 def _fix_long_shot_chunked(
     job_id: str,
     error_id: str,
@@ -896,18 +947,34 @@ def _fix_long_shot_chunked(
     engine: str = DEFAULT_ENGINE,
 ) -> tuple[str, float | None]:
     """
-    Fix a shot longer than MAX_CLIP_DURATION by splitting into ≤5s chunks,
-    running each through Runway aleph2, then concatenating the results.
-    Returns (local path to the final concatenated fixed clip, total credits charged).
+    Fix a shot too long for the chosen engine by splitting it, running each
+    piece, then joining them back together.
+
+    The split point is the ENGINE's own limit, not one global number.
+    gemini_omni_flash takes 10 seconds where aleph2 takes 30, and real footage
+    is mostly longer than 10s — the first two shots a live user brought us were
+    10.70s and 12.63s. Without this, the engine that actually repairs a clip is
+    unreachable for most of the material people upload.
+
+    Each piece is regenerated independently, so the look can step at a join.
+    CHUNK_CROSSFADE_S of overlap is dissolved across every join to hide that;
+    it disguises a grade or exposure step well and cannot disguise the two
+    pieces diverging in content.
+
+    Returns (local path to the final joined clip, total credits charged).
     """
     shot_start_ms = fix_shot["startMs"]
     shot_end_ms = fix_shot["endMs"]
     shot_dur = (shot_end_ms - shot_start_ms) / 1000.0
 
-    n_chunks = math.ceil(shot_dur / MAX_CLIP_DURATION)
+    limit = min(FIX_ENGINES[engine]["max_input_s"], MAX_CLIP_DURATION)
+    n_chunks = math.ceil(shot_dur / limit)
     chunk_dur_ms = (shot_end_ms - shot_start_ms) / n_chunks
 
-    print(f"  Chunking {shot_dur:.1f}s shot into {n_chunks} × {chunk_dur_ms/1000:.1f}s chunks")
+    print(
+        f"  Chunking {shot_dur:.1f}s shot into {n_chunks} × "
+        f"{chunk_dur_ms/1000:.1f}s chunks for {engine} (limit {limit}s)"
+    )
 
     fixed_chunk_paths: list[str] = []
     total_cost = 0.0
@@ -949,13 +1016,20 @@ def _fix_long_shot_chunked(
 
         fixed_chunk_paths.append(chunk_fixed_local)
 
-    # Concat all fixed chunks into one clip
+    final_path = os.path.join(tmp, f"chunked_fixed_{error_id}.mp4")
+
+    if len(fixed_chunk_paths) > 1 and CHUNK_CROSSFADE_S > 0:
+        blended = _crossfade_concat(fixed_chunk_paths, final_path, tmp)
+        if blended:
+            return final_path, (total_cost if cost_known else None)
+        print("  Cross-fade join failed; falling back to a hard cut")
+
+    # Hard concat — also the path for a single chunk.
     concat_txt = os.path.join(tmp, "chunks_concat.txt")
     with open(concat_txt, "w") as f:
         for p in fixed_chunk_paths:
             f.write(f"file '{p}'\n")
 
-    final_path = os.path.join(tmp, f"chunked_fixed_{error_id}.mp4")
     result = subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_txt, "-c", "copy", final_path],
         capture_output=True,
@@ -1218,7 +1292,7 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             runway_cost: float | None = None
             runway_task_id: str | None = None
 
-            if shot_dur > MAX_CLIP_DURATION:
+            if shot_dur > min(FIX_ENGINES[engine]["max_input_s"], MAX_CLIP_DURATION):
                 # Long shot: chunk into ≤5s segments, fix each, concatenate
                 chunked_path, runway_cost = _fix_long_shot_chunked(
                     job_id=job_id,
@@ -1308,7 +1382,9 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     "shot_duration_seconds": round(shot_dur, 3),
                     "credits_charged_to_user": error.get("creditsDeducted"),
                     "runway_balance_after": runway_credit_balance(),
-                    "was_chunked": shot_dur > MAX_CLIP_DURATION,
+                    "was_chunked": shot_dur > min(
+                        FIX_ENGINES[engine]["max_input_s"], MAX_CLIP_DURATION
+                    ),
                     "verified_resolved": verified_resolved,
                     "retry_count": error.get("retryCount", 0),
                     # Runway credits per second of output actually delivered.
