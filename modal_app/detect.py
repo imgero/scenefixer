@@ -50,6 +50,20 @@ WRITE_CONCURRENCY = 8
 # appearing before the shooting is only visible across distant shots.
 GRADE_TYPES = {"lighting", "atmosphere", "other"}
 
+
+def is_far_grade_error(idx_a: int, idx_b: int, err_type: str) -> bool:
+    """
+    True when this error describes how two NON-ADJACENT shots differ in look.
+
+    Used by both detection and verification. Verification matters as much as
+    detection here: scoreAfter re-runs compare_pair over the output video, so
+    without this the same cross-scene grade differences would come back as
+    "Aleph introduced 25 new issues" on a video that was repaired correctly.
+    """
+    if idx_a == idx_b or abs(idx_b - idx_a) == 1:
+        return False
+    return (err_type or "").lower() in GRADE_TYPES
+
 # Hard ceiling on pair comparisons for one job. A long video with many shots
 # would otherwise grow quadratically without bound; adjacent pairs are kept
 # first because they carry most of the continuity signal.
@@ -518,13 +532,10 @@ def run_detect(job_id: str) -> int:
     dropped_far = 0
 
     for _, sa, sb, errs in results:
-        standalone = sa["id"] == sb["id"]
-        adjacent = (
-            standalone
-            or abs(shot_index.get(sb["id"], 0) - shot_index.get(sa["id"], 0)) == 1
-        )
+        ia = shot_index.get(sa["id"], 0)
+        ib = shot_index.get(sb["id"], 0)
         for err in errs:
-            if not adjacent and (err.get("type") or "").lower() in GRADE_TYPES:
+            if is_far_grade_error(ia, ib, err.get("type")):
                 # A grade/style difference between shot 1 and shot 9 is what a
                 # cut between two scenes looks like, not an error. See
                 # GRADE_TYPES.

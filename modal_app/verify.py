@@ -15,7 +15,7 @@ from modal_app.decompose import (
     extract_keyframe,
     upload_keyframe,
 )
-from modal_app.detect import get_pairs_to_compare, compare_pair
+from modal_app.detect import get_pairs_to_compare, compare_pair, is_far_grade_error
 from modal_app.prompts import compute_continuity_score
 import os
 import tempfile
@@ -62,9 +62,26 @@ def run_verify(job_id: str) -> dict:
         # Compare pairs and collect new errors
         pairs = get_pairs_to_compare(verify_shots)
         new_errors = []
+        dropped_far = 0
         for shot_a, shot_b in pairs:
             errors = compare_pair(job_id, shot_a, shot_b)
-            new_errors.extend(errors)
+            for err in errors:
+                # Same rule detection uses. Without it, a correctly repaired
+                # video comes back covered in "new issues" that are really just
+                # its own scene cuts, and scoreAfter collapses to 0 — the
+                # output would be judged by a standard the input never had to
+                # meet.
+                if is_far_grade_error(
+                    shot_a["index"], shot_b["index"], err.get("type")
+                ):
+                    dropped_far += 1
+                    continue
+                new_errors.append(err)
+        if dropped_far:
+            print(
+                f"Verify: dropped {dropped_far} grade/style errors between "
+                f"non-adjacent shots"
+            )
 
         score_after = compute_continuity_score(new_errors)
 
