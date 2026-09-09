@@ -29,6 +29,12 @@ SMALL_VIDEO_THRESHOLD = 10  # ≤ this many shots → compare every pair
 # staring at a progress bar.
 DETECT_CONCURRENCY = 8
 
+# Writing an error is not a cheap Firestore add: it runs Grounding DINO over
+# every keyframe of the target shot first. Those writes run concurrently too,
+# bounded here and again by GROUNDING_CONCURRENCY inside grounding.py so the
+# two levels together cannot flood Replicate.
+WRITE_CONCURRENCY = 8
+
 # Hard ceiling on pair comparisons for one job. A long video with many shots
 # would otherwise grow quadratically without bound; adjacent pairs are kept
 # first because they carry most of the continuity signal.
@@ -548,12 +554,33 @@ def run_detect(job_id: str) -> int:
         if not is_dup:
             deduped.append((sa, sb, err))
 
-    # 3. Write deduped errors
-    total_errors = 0
-    for sa, sb, err in deduped:
-        write_errors(job_id, sa, sb, [err])
-        total_errors += 1
-    print(f"Detection: {len(raw)} raw → {total_errors} after dedup")
+    # 3. Write deduped errors.
+    #
+    # Each write runs Grounding DINO over the target shot's 5 keyframes to
+    # localize the object, and that is a Replicate prediction per frame. Run
+    # sequentially, one error cost ~5 minutes and the loop dominated the whole
+    # analysis: a 23-second video with 36 errors spent 80 minutes here while
+    # detection itself, being cached and concurrent, finished in seconds.
+    #
+    # The writes are independent — each adds its own document — so they run
+    # concurrently. Ordering does not matter: dedupe already ran, and document
+    # ids are generated per add().
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+    def _write_one(item):
+        sa, sb, err = item
+        try:
+            write_errors(job_id, sa, sb, [err])
+            return True
+        except Exception as exc:
+            # One failed localization must not lose the other thirty-five.
+            print(f"write_errors failed ({type(exc).__name__}: {exc})")
+            return False
+
+    with _TPE(max_workers=WRITE_CONCURRENCY) as pool:
+        written = list(pool.map(_write_one, deduped))
+    total_errors = sum(1 for ok in written if ok)
+    print(f"Detection: {len(raw)} raw → {len(deduped)} after dedup → {total_errors} written")
 
     from modal_app.prompts import compute_continuity_score
     all_errors_snap = (

@@ -10,9 +10,20 @@ vs Opus's free-form bbox at ~0.2–0.3.
 """
 
 import os
+import threading
 import time
 
 import requests
+
+# Total Grounding DINO predictions in flight across the whole process.
+#
+# Localization is now concurrent at two levels — write_errors runs several
+# errors at once, and each error localizes its 5 keyframes at once — so
+# without a shared ceiling a 36-error job would open ~40 Replicate
+# predictions simultaneously and start collecting 429s. This semaphore is
+# the one place that bound lives.
+GROUNDING_CONCURRENCY = 12
+_grounding_slots = threading.Semaphore(GROUNDING_CONCURRENCY)
 
 # Keyframes are extracted at this resolution by decompose.transcode_to_720p.
 # Grounding DINO returns pixel coords; we normalize against these dimensions.
@@ -35,9 +46,23 @@ def localize_with_grounding_dino(
     Ask Grounding DINO to locate `query` in `image_url`.
     Returns {"x","y","w","h","score"} as fractions of image w/h, or None.
 
-    Uses Replicate's synchronous predictions endpoint (Prefer: wait), so
-    we either get the result back in one call or have to poll.
+    Callers run this concurrently from several threads; the semaphore holds
+    total in-flight predictions to GROUNDING_CONCURRENCY. It is acquired
+    around the whole request, polling included, because a prediction that is
+    still polling is still occupying Replicate capacity.
     """
+    with _grounding_slots:
+        return _grounding_dino_request(
+            image_url, query, box_threshold, text_threshold
+        )
+
+
+def _grounding_dino_request(
+    image_url: str,
+    query: str,
+    box_threshold: float,
+    text_threshold: float,
+) -> dict | None:
     token = os.environ.get("REPLICATE_API_TOKEN")
     if not token:
         print("REPLICATE_API_TOKEN not set; skipping Grounding DINO")
@@ -259,8 +284,23 @@ def localize_best_frame(
     best_url: str | None = None
     best_score = 0.0
 
-    for url in keyframe_urls:
-        bbox = localize_with_grounding_dino(url, query)
+    # One Replicate prediction per frame, and each takes up to ~60s. Five
+    # frames in sequence is five minutes for a single error; run them together
+    # and it is one prediction's worth of wall time. _grounding_slots keeps the
+    # total across all callers bounded.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(url: str):
+        try:
+            return url, localize_with_grounding_dino(url, query)
+        except Exception as exc:
+            print(f"Grounding DINO frame failed ({type(exc).__name__}: {exc})")
+            return url, None
+
+    with ThreadPoolExecutor(max_workers=len(keyframe_urls)) as pool:
+        results = list(pool.map(_one, keyframe_urls))
+
+    for url, bbox in results:
         if not bbox:
             continue
         score = bbox.get("score", 0.0)
