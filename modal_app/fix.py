@@ -1455,10 +1455,49 @@ def fix_single_error(job_id: str, error_id: str) -> None:
         import traceback
         full = traceback.format_exc()
         print(f"fix_single_error failed for {error_id}:\n{full}")
+
+        # Ask Claude what this was. Only reached when no earlier branch
+        # recognised the failure, which is exactly the case the user used to
+        # get "Fix failed. Please try again." for. Best effort: if it cannot
+        # answer, the raw message stands as before.
+        diagnosis = None
+        try:
+            from modal_app.diagnose import diagnose_failure
+            from modal_app.firebase import get_db as _get_db
+
+            _db = _get_db()
+            _shots = [
+                d.to_dict() or {}
+                for d in _db.collection("jobs").document(job_id)
+                .collection("shots").order_by("index").get()
+            ]
+            _owner = (job or {}).get("ownerUid")
+            _user = (
+                (_db.collection("users").document(_owner).get().to_dict() or {})
+                if _owner else {}
+            )
+            diagnosis = diagnose_failure(
+                failure_text=full[-2500:],
+                engine=locals().get("engine") or DEFAULT_ENGINE,
+                engine_specs=FIX_ENGINES,
+                error_doc=error,
+                shots=_shots,
+                plan=_user.get("plan", "free"),
+                credits_available=_user.get("creditsBalance"),
+                credits_needed=error.get("creditsDeducted"),
+            )
+        except Exception as diag_err:
+            print(f"diagnosis skipped: {diag_err}")
+
         error_ref.update({
             "fixStatus": "failed",
-            "errorMessage": str(e),
+            # errorMessage is what the UI shows. Claude's sentence replaces the
+            # raw exception when we have one; the exception is kept alongside
+            # it so nothing is lost for debugging.
+            "errorMessage": (diagnosis or {}).get("message") or str(e),
             "errorDetail": full[-1000:],
+            "rawErrorMessage": str(e),
+            **({"diagnosis": diagnosis} if diagnosis else {}),
         })
 
         # A fix that threw delivered nothing, so its credits go back. Previously
@@ -1480,6 +1519,8 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     "error_id": error_id,
                     "error_type": error.get("type"),
                     "error_message": str(e)[:300],
+                    "diagnosed_cause": (diagnosis or {}).get("cause"),
+                    "diagnosis_retryable": (diagnosis or {}).get("retryable"),
                     # locals() because the failure may predate engine selection.
                     "fix_engine": locals().get("engine"),
                     "runway_model": FIX_ENGINES.get(

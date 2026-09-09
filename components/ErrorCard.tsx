@@ -372,6 +372,44 @@ export default function ErrorCard({
 
           {/* Action row */}
           <div className="mb-4">
+            {error.fixStatus === "failed" && error.diagnosis && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 mb-3">
+                <p className="text-sm text-gray-900">{error.diagnosis.message}</p>
+                {!!error.diagnosis.actions?.length && (
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    {error.diagnosis.actions.map((a) => {
+                      const href =
+                        a.kind === "buy_credits" || a.kind === "upgrade"
+                          ? "/pricing"
+                          : a.kind === "contact_support"
+                            ? "mailto:help@scenefixer.com"
+                            : null;
+                      const cls =
+                        "px-3 py-1.5 rounded-lg border border-amber-300 bg-white hover:bg-amber-100 text-amber-900 text-xs font-medium transition-colors";
+                      if (href) {
+                        return (
+                          <a key={a.kind} href={href} className={cls}>
+                            {a.label}
+                          </a>
+                        );
+                      }
+                      // Everything else is something they do on this card —
+                      // the buttons for it are already below, so this labels
+                      // the suggestion rather than duplicating the control.
+                      return (
+                        <span
+                          key={a.kind}
+                          className="px-3 py-1.5 rounded-lg bg-amber-100 text-amber-900 text-xs font-medium"
+                        >
+                          {a.label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {notRepairable && (
               <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5">
                 <p className="text-sm font-medium text-gray-900">

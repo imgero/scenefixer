@@ -119,6 +119,22 @@ export type ContinuityError = {
    */
   repairable?: boolean;
   notRepairableReason?: string;
+  /**
+   * Written by Claude when a fix failed for a reason nothing in the pipeline
+   * anticipated — a provider changing what it accepts, an unusual file, a new
+   * limit. `message` is shown to the user verbatim in place of the raw
+   * exception; `actions` are rendered as buttons. Absent for failures that had
+   * a specific handler, and absent when the diagnosis itself could not run.
+   */
+  diagnosis?: {
+    cause?: string;
+    message: string;
+    actions?: { label: string; kind: string }[];
+    retryable?: boolean;
+    confidence?: "low" | "medium" | "high";
+  };
+  /** The original exception text, kept when `errorMessage` was replaced. */
+  rawErrorMessage?: string;
   /** Overrides automatic engine routing — used to retry on a different model. */
   fixEngine?: string;
   fixEngineUsed?: string;
