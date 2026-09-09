@@ -21,9 +21,10 @@ keeps whatever generic message it already had; an explanation is worth having
 but never worth failing a job over.
 """
 
+from __future__ import annotations
+
 import json
 import os
-import re
 
 # What the UI knows how to render as a button. Claude picks from these, so a
 # suggestion is always something the user can actually do from where they are.
