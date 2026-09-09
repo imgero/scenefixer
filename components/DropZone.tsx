@@ -32,6 +32,11 @@ export default function DropZone() {
   const hintRef = useRef<HTMLTextAreaElement>(null);
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
+  // What the user is actually waiting on. Between picking a file and the first
+  // byte moving there can be several seconds — creating the job, signing the
+  // URL — during which the old UI showed the untouched drop zone, so it looked
+  // like the click had done nothing.
+  const [stage, setStage] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState("");
   const [signingIn, setSigningIn] = useState(false);
@@ -81,6 +86,10 @@ export default function DropZone() {
       const trimmedHint = hint.trim().slice(0, 500);
       const betaId = betaMode ? getBetaId() : null;
 
+      // Show the panel immediately, before any network call.
+      setProgress(0);
+      setStage("Preparing your upload…");
+
       try {
         const token = await auth.currentUser?.getIdToken();
         const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -120,6 +129,7 @@ export default function DropZone() {
         // upload silently never landed. With no event on this step there was no
         // way to tell a network failure from an expired URL from a file the
         // browser could not read. Every outcome here is now reported.
+        setStage("Uploading…");
         const uploadStartedAt = Date.now();
         const sizeMb = Math.round(file.size / 1024 / 1024);
         posthog.capture("upload_started", {
@@ -181,6 +191,7 @@ export default function DropZone() {
           xhr.send(file);
         });
 
+        setStage("Starting analysis…");
         posthog.capture("upload_completed", {
           job_id: jobId,
           file_size_mb: sizeMb,
@@ -238,8 +249,16 @@ export default function DropZone() {
         router.push(`/job/${jobId}`);
       } catch (err) {
         console.error(err);
-        setError("Upload failed. Please try again.");
+        const msg = err instanceof Error ? err.message : "";
+        setError(
+          msg.includes("timed out")
+            ? "The upload timed out. That usually means a slow connection — try again, or try a smaller file."
+            : msg.includes("network")
+              ? "The connection dropped during upload. Check your network and try again."
+              : "Upload failed. Please try again."
+        );
         setProgress(null);
+        setStage("");
       }
     },
     [router, hint, betaMode]
@@ -264,17 +283,27 @@ export default function DropZone() {
   );
 
   if (progress !== null) {
+    // Before the first byte moves there is no percentage to show, so the bar
+    // animates instead of sitting at a dead 0%.
+    const indeterminate = progress === 0;
     return (
       <div className="w-full max-w-xl mx-auto">
         <div className="rounded-2xl border border-gray-200 bg-white p-8 text-center">
-          <p className="text-sm text-gray-500 mb-3">Uploading…</p>
-          <div className="w-full bg-gray-100 rounded-full h-1.5">
+          <p className="text-sm text-gray-500 mb-3">{stage || "Uploading…"}</p>
+          <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
             <div
-              className="bg-black h-1.5 rounded-full transition-all duration-200"
-              style={{ width: `${progress}%` }}
+              className={`bg-black h-1.5 rounded-full ${
+                indeterminate ? "w-1/3 animate-pulse" : "transition-all duration-200"
+              }`}
+              style={indeterminate ? undefined : { width: `${progress}%` }}
             />
           </div>
-          <p className="text-black mt-3 text-lg font-semibold tabular-nums">{progress}%</p>
+          <p className="text-black mt-3 text-lg font-semibold tabular-nums">
+            {indeterminate ? "\u00a0" : `${progress}%`}
+          </p>
+          <p className="text-gray-400 text-xs mt-2">
+            Large files can take a few minutes. Keep this tab open.
+          </p>
         </div>
       </div>
     );
