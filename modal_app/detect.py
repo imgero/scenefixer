@@ -21,6 +21,19 @@ HOLISTIC_VERSION = "v1"  # separate version for holistic scene analysis
 WINDOW_SECONDS = 60  # sliding window for same-scene detection
 SMALL_VIDEO_THRESHOLD = 10  # ≤ this many shots → compare every pair
 
+# Detection calls are independent and I/O-bound, so they run concurrently.
+# They used to run one after another, which was tolerable while a video was
+# 2 shots and became a 20-minute wait the moment shot detection started
+# finding the cuts it had been missing: 10 shots is 45 pair comparisons plus
+# 10 standalone passes, and sequentially that is half an hour of someone
+# staring at a progress bar.
+DETECT_CONCURRENCY = 8
+
+# Hard ceiling on pair comparisons for one job. A long video with many shots
+# would otherwise grow quadratically without bound; adjacent pairs are kept
+# first because they carry most of the continuity signal.
+MAX_PAIRS = 60
+
 _RETRY_DELAYS = (5, 15, 45)  # seconds between attempts on 529
 
 
@@ -55,18 +68,25 @@ def get_pairs_to_compare(shots: list[dict]) -> list[tuple[dict, dict]]:
         for i in range(n):
             for j in range(i + 1, n):
                 pairs.add((i, j))
-        return [(shots[a], shots[b]) for (a, b) in sorted(pairs)]
+    else:
+        for i in range(n):
+            if i + 1 < n:
+                pairs.add((i, i + 1))
+            for j in range(i + 2, n):
+                if shots[j]["startMs"] - shots[i]["startMs"] <= WINDOW_SECONDS * 1000:
+                    pairs.add((i, j))
+                else:
+                    break
 
-    for i in range(n):
-        if i + 1 < n:
-            pairs.add((i, i + 1))
-        for j in range(i + 2, n):
-            if shots[j]["startMs"] - shots[i]["startMs"] <= WINDOW_SECONDS * 1000:
-                pairs.add((i, j))
-            else:
-                break
+    # Trim to MAX_PAIRS by preferring the closest pairs. Adjacent shots carry
+    # most of the continuity signal; a comparison between shot 2 and shot 40 is
+    # the first thing worth dropping.
+    ordered = sorted(pairs, key=lambda p: (p[1] - p[0], p[0]))
+    if len(ordered) > MAX_PAIRS:
+        print(f"get_pairs_to_compare: {len(ordered)} pairs trimmed to {MAX_PAIRS}")
+        ordered = ordered[:MAX_PAIRS]
 
-    return [(shots[a], shots[b]) for (a, b) in sorted(pairs)]
+    return [(shots[a], shots[b]) for (a, b) in sorted(ordered)]
 
 
 def cache_key(urls_a: list[str], urls_b: list[str], user_hint: str = "") -> str:
@@ -446,19 +466,36 @@ def run_detect(job_id: str) -> int:
     # 1. Collect all errors — both standalone (per-shot) and pair-wise (cross-shot).
     raw: list[tuple[dict, dict, dict]] = []  # (shot_a, shot_b, err)
 
-    # Standalone — catches anachronisms even in 1-shot videos and when
-    # the same anachronism is present across all shots (no pair difference).
-    for shot in shots:
-        for err in detect_standalone(job_id, shot, user_hint):
-            raw.append((shot, shot, err))
+    # Standalone (one per shot) and pair-wise (cross-shot) detection are
+    # independent API calls, so they are issued concurrently and collected in a
+    # fixed order afterwards — dedupe depends on the order being deterministic,
+    # so results are indexed rather than appended as they land.
+    from concurrent.futures import ThreadPoolExecutor
 
-    # Pair-wise — catches cross-shot continuity errors (props changing,
-    # temporal/causation errors, wardrobe shifts).
-    if len(shots) >= 2:
-        pairs = get_pairs_to_compare(shots)
-        for shot_a, shot_b in pairs:
-            for err in compare_pair(job_id, shot_a, shot_b, user_hint):
-                raw.append((shot_a, shot_b, err))
+    pair_list = get_pairs_to_compare(shots) if len(shots) >= 2 else []
+    tasks: list[tuple[dict, dict]] = [(shot, shot) for shot in shots] + pair_list
+    print(
+        f"Detection: {len(shots)} standalone + {len(pair_list)} pair comparisons "
+        f"across {DETECT_CONCURRENCY} workers"
+    )
+
+    def _run(idx_task):
+        idx, (sa, sb) = idx_task
+        try:
+            if sa["id"] == sb["id"]:
+                return idx, sa, sb, detect_standalone(job_id, sa, user_hint)
+            return idx, sa, sb, compare_pair(job_id, sa, sb, user_hint)
+        except Exception as exc:
+            # One comparison failing must not lose the other fifty-five.
+            print(f"Detection task {idx} failed ({type(exc).__name__}: {exc})")
+            return idx, sa, sb, []
+
+    with ThreadPoolExecutor(max_workers=DETECT_CONCURRENCY) as pool:
+        results = sorted(pool.map(_run, enumerate(tasks)), key=lambda r: r[0])
+
+    for _, sa, sb, errs in results:
+        for err in errs:
+            raw.append((sa, sb, err))
 
     # Holistic — catches outlier shots that pair-wise misses (e.g. one rogue
     # clip that doesn't stand out in any single pair but is wrong vs. the whole).
