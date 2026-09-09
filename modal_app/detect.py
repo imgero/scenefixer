@@ -35,6 +35,21 @@ DETECT_CONCURRENCY = 8
 # two levels together cannot flood Replicate.
 WRITE_CONCURRENCY = 8
 
+# Error types that describe how a shot LOOKS rather than what is in it.
+#
+# These are only meaningful between shots that are supposed to match. Once
+# shot detection started finding every cut, comparing all pairs meant shot 1
+# was judged against shot 9 — and a deliberate cut from a stormy exterior to a
+# candlelit crypt came back as an "atmosphere error" telling us to replace one
+# background with the other. On a 10-shot video that produced 28 such errors
+# out of 36, each one instructing a different shot to match a different
+# reference, several of them flatly contradictory.
+#
+# Object-level errors (prop, wardrobe, hair, set_dressing, eyeline) still
+# compare across every pair: a temporal/causation error like bullet holes
+# appearing before the shooting is only visible across distant shots.
+GRADE_TYPES = {"lighting", "atmosphere", "other"}
+
 # Hard ceiling on pair comparisons for one job. A long video with many shots
 # would otherwise grow quadratically without bound; adjacent pairs are kept
 # first because they carry most of the continuity signal.
@@ -499,12 +514,37 @@ def run_detect(job_id: str) -> int:
     with ThreadPoolExecutor(max_workers=DETECT_CONCURRENCY) as pool:
         results = sorted(pool.map(_run, enumerate(tasks)), key=lambda r: r[0])
 
+    shot_index = {shot["id"]: i for i, shot in enumerate(shots)}
+    dropped_far = 0
+
     for _, sa, sb, errs in results:
+        standalone = sa["id"] == sb["id"]
+        adjacent = (
+            standalone
+            or abs(shot_index.get(sb["id"], 0) - shot_index.get(sa["id"], 0)) == 1
+        )
         for err in errs:
+            if not adjacent and (err.get("type") or "").lower() in GRADE_TYPES:
+                # A grade/style difference between shot 1 and shot 9 is what a
+                # cut between two scenes looks like, not an error. See
+                # GRADE_TYPES.
+                dropped_far += 1
+                continue
             raw.append((sa, sb, err))
+
+    if dropped_far:
+        print(
+            f"Detection: dropped {dropped_far} grade/style errors "
+            f"between non-adjacent shots"
+        )
 
     # Holistic — catches outlier shots that pair-wise misses (e.g. one rogue
     # clip that doesn't stand out in any single pair but is wrong vs. the whole).
+    #
+    # Exempt from the adjacency rule above on purpose: holistic compares one
+    # shot against the whole sequence, so "this shot is the odd one out" is
+    # exactly the cross-scene grade judgement adjacency is meant to suppress
+    # between arbitrary pairs. It is the sanctioned way to catch a rogue clip.
     for result in detect_holistic(job_id, shots, user_hint):
         raw.append(result)
 
@@ -515,10 +555,26 @@ def run_detect(job_id: str) -> int:
         stop = {
             "the", "a", "an", "in", "on", "of", "at", "and", "or",
             "is", "are", "with", "to", "from", "behind",
+            # Colours and generic intensity words carry no identity: two pairs
+            # describing the same defect rarely agree on them ("black painted
+            # fingernails" vs "fingernail color"), and when they do agree it is
+            # usually coincidence ("black sleep mask" vs "black fingernails" on
+            # the same shot are different defects). Dropping them makes the
+            # overlap that remains a real one.
+            "black", "white", "red", "blue", "green", "golden", "gold",
+            "warm", "cool", "dark", "light", "bright", "overall",
         }
+        # Trailing "s" is stripped so "fingernail color" and "black painted
+        # fingernails" — the same defect reported by two different pairs —
+        # share a word and can dedupe. Without it they had zero overlap and
+        # both survived.
+        def _stem(w: str) -> str:
+            w = w.lower().strip(".,'\"")
+            return w[:-1] if len(w) > 3 and w.endswith("s") else w
+
         return frozenset(
-            w.lower().strip(".,'\"") for w in (s or "").split()
-            if w.lower().strip(".,'\"") and w.lower() not in stop
+            _stem(w) for w in (s or "").split()
+            if _stem(w) and w.lower() not in stop
         )
 
     def _similar(a: frozenset[str], b: frozenset[str]) -> bool:
