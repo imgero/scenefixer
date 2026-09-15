@@ -24,6 +24,74 @@ import requests
 
 from modal_app.firebase import get_db, get_bucket
 from modal_app.prompts import build_aleph_prompt
+from modal_app.stitch import mean_luma
+
+# Error types whose subject IS the relationship between two shots' looks.
+# Mirrors GRADE_TYPES in detect.py, kept literal to avoid importing the
+# detection module into the fix worker.
+GRADE_TYPES = {"lighting", "atmosphere", "other"}
+
+# How much further from its reference a fix may drift before the result counts
+# as a regression rather than noise, in 0-255 mean luma. Sits above the ~1.4
+# step real footage shows at its own cuts, so ordinary variation never trips it.
+CONTINUITY_REGRESSION_LUMA = 3.0
+
+
+def _continuity_regressed(shots_ref, input_video_url, fixed_local, tmp, shot_id, ref_id):
+    """
+    Did this grade fix move its shot FURTHER from the shot it was told to match?
+
+    Returns (gap_before, gap_after) when it did, else None.
+
+    The Opus verifier checks whether the thing it was asked about is still
+    visible, which is not the same question as whether the two shots now match.
+    Observed on job v2testou8rhv8vd9: a fix passed with "All frames show a sunny
+    sky and green trees through the window with no rain visible anywhere" while
+    its mean level moved from 12.4 luma away from the reference shot to 23.3.
+    The user's complaint was the mismatch; we widened it and reported success.
+
+    Deliberately one-sided: it only ever fails a fix that made the gap WORSE. A
+    fix that closes the gap partway is an improvement and passes, and a shot
+    that legitimately differs in average brightness from its reference is not
+    penalised as long as the fix did not make that difference larger.
+    """
+    if not ref_id or ref_id == shot_id:
+        return None
+    try:
+        target = shots_ref.document(shot_id).get().to_dict() or {}
+        ref = shots_ref.document(ref_id).get().to_dict() or {}
+        if "startMs" not in target or "startMs" not in ref:
+            return None
+
+        original = os.path.join(tmp, "continuity_source.mp4")
+        if not os.path.exists(original):
+            r = requests.get(input_video_url, timeout=180, stream=True)
+            r.raise_for_status()
+            with open(original, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+        def shot_luma(shot):
+            return mean_luma(
+                original,
+                ss=shot["startMs"] / 1000.0,
+                t=(shot["endMs"] - shot["startMs"]) / 1000.0,
+            )
+
+        ref_luma = shot_luma(ref)
+        plate_luma = shot_luma(target)
+        fixed_luma = mean_luma(fixed_local)
+        if None in (ref_luma, plate_luma, fixed_luma):
+            return None
+
+        gap_before = abs(plate_luma - ref_luma)
+        gap_after = abs(fixed_luma - ref_luma)
+        if gap_after > gap_before + CONTINUITY_REGRESSION_LUMA:
+            return gap_before, gap_after
+    except Exception as e:
+        # A measurement problem must never fail a fix that Opus passed.
+        print(f"continuity check skipped for {shot_id}: {e}")
+    return None
 
 MAX_CLIP_DURATION = 28.0  # aleph2 accepts up to 30s; 28s gives a small safety margin
 # aleph2 rejects any videoUri under 2 seconds:
@@ -1511,6 +1579,55 @@ def fix_single_error(job_id: str, error_id: str) -> None:
 
         error_still_visible = verify_result.get("errorStillVisible")
         verified_resolved = error_still_visible is False
+
+        # Second gate: did the fix actually move TOWARD the shot it was told to
+        # match? The Opus verifier answers the question it was asked — "is the
+        # rain gone?" — and nothing else. On job v2testou8rhv8vd9 it passed an
+        # atmosphere fix with "All frames show a sunny sky and green trees", on
+        # a clip whose mean level had moved AWAY from its reference shot: a 12.4
+        # luma gap in the source became 23.3 in the output. The defect the user
+        # reported was the mismatch between two shots, and we made it worse
+        # while reporting success.
+        #
+        # Only grade work is judged this way — its whole subject is the
+        # relationship between two shots. Object fixes (a prop, wardrobe) are
+        # not expected to move the level at all, and stitch.py corrects them if
+        # they drift.
+        if verified_resolved and str(error.get("type") or "").lower() in GRADE_TYPES:
+            ref_id = (
+                error.get("shotAId")
+                if error.get("fixDirection", "aTob") == "aTob"
+                else error.get("shotBId")
+            )
+            drift = _continuity_regressed(
+                shots_ref=shots_ref,
+                input_video_url=job["inputVideoUrl"],
+                fixed_local=fixed_local,
+                tmp=tmp,
+                shot_id=fix_shot_id,
+                ref_id=ref_id,
+            )
+            if drift is not None:
+                gap_before, gap_after = drift
+                verified_resolved = False
+                verify_result = {
+                    **verify_result,
+                    "errorStillVisible": True,
+                    "continuityRegressed": True,
+                    "gapBefore": round(gap_before, 2),
+                    "gapAfter": round(gap_after, 2),
+                    "notes": (
+                        (verify_result.get("notes") or "")
+                        + f" [continuity check: this shot moved further from "
+                          f"{ref_id} than before the fix — {gap_before:.1f} → "
+                          f"{gap_after:.1f} mean luma. The mismatch the fix was "
+                          f"asked to close got wider.]"
+                    ),
+                }
+                print(
+                    f"  {error_id}: verifier passed but continuity REGRESSED "
+                    f"({gap_before:.1f} → {gap_after:.1f}) — marking unverified"
+                )
 
         update_data = {
             "fixStatus": "fixed",

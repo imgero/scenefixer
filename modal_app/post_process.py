@@ -16,6 +16,7 @@ import tempfile
 import requests
 
 from modal_app.firebase import get_db, get_bucket
+from modal_app.stitch import probe_dimensions
 
 QUALITY_MAP = {
     "free":    {"height": 480,  "watermark": True},
@@ -72,12 +73,30 @@ def run_post_process(job_id: str) -> str:
 
         processed_path = os.path.join(tmp, "output_processed.mp4")
 
-        # Scale filter: maintain aspect ratio, pad to even dimensions.
-        # For 1080p we upscale; for 480p we downscale.
-        scale_filter = (
-            f"scale=-2:{target_h}:flags=bicubic,"
-            f"pad=iw:ih:0:0:color=black"
+        # The plan's number is the SHORT side, not the height.
+        #
+        # This scaled to `target_h` as a height regardless of orientation. On a
+        # landscape video that is the short side and "480p" means 854x480 — what
+        # the tier promises. On a PORTRAIT video the height is the LONG side, so
+        # the same code produced 270x480: a short side of 270, barely half the
+        # tier, while a landscape user on the identical plan got 480. Vertical
+        # is the format most of our uploads arrive in, so the tier was quietly
+        # worth less to the majority of users.
+        #
+        # Scaling the short side makes the tier mean the same thing in both
+        # orientations: 854x480 landscape, 480x854 portrait.
+        src_w, src_h = probe_dimensions(raw_path)
+        portrait = src_h > src_w > 0
+        scale_expr = (
+            f"scale={target_h}:-2:flags=bicubic"
+            if portrait
+            else f"scale=-2:{target_h}:flags=bicubic"
         )
+        print(
+            f"post_process: source {src_w}x{src_h} "
+            f"({'portrait' if portrait else 'landscape'}) → short side {target_h}"
+        )
+        scale_filter = f"{scale_expr},pad=iw:ih:0:0:color=black"
 
         if add_watermark:
             font_size = max(18, target_h // 25)

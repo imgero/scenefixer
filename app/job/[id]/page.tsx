@@ -245,6 +245,21 @@ export default function JobPage({ params }: Props) {
   const handleDownload = async () => {
     if (!job?.outputVideoUrl || downloading) return;
     setDownloading(true);
+    // The moment the whole product exists for, and until now the only step in
+    // the funnel with no event on it at all. Every delivery fix we have shipped
+    // was measured on our own machines; nothing told us whether a single user
+    // ever actually retrieved their file. Captured before the fetch so a
+    // download that fails midway is still counted as an attempt.
+    posthog.capture("download_started", {
+      job_id: jobId,
+      fixes_verified: job.fixesVerified ?? 0,
+      fixes_attempted: job.fixesAttempted ?? 0,
+      fixes_failed: job.fixesFailed ?? 0,
+      verification_passed: job.verificationPassed ?? null,
+      score_before: job.scoreBefore ?? null,
+      score_after_reliable: job.scoreAfterReliable ?? null,
+      credits_refunded: job.creditsRefunded ?? 0,
+    });
     try {
       const res = await fetch(job.outputVideoUrl);
       const blob = await res.blob();
@@ -256,8 +271,16 @@ export default function JobPage({ params }: Props) {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(blobUrl);
-    } catch {
+      posthog.capture("download_completed", {
+        job_id: jobId,
+        bytes: blob.size,
+      });
+    } catch (err) {
       // fallback: open in new tab
+      posthog.capture("download_failed", {
+        job_id: jobId,
+        message: err instanceof Error ? err.message.slice(0, 200) : "unknown",
+      });
       window.open(job.outputVideoUrl, "_blank");
     } finally {
       setDownloading(false);
