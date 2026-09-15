@@ -1,98 +1,34 @@
 "use client";
 
 import { Suspense, useEffect, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/hooks/useAuth";
 import { auth } from "@/lib/firebase";
 import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 import Link from "next/link";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
+import { PLAN_LIMITS, FREE_SCANS_PER_DAY } from "@/lib/types";
 
-const PLANS = [
-  {
-    id: "free",
-    name: "Free",
-    monthly: 0,
-    annual: 0,
-    credits: 30,
-    maxVideo: "30 sec",
-    quality: "480p",
-    watermark: true,
-    features: [
-      "Unlimited continuity scans",
-      // Stated in fixes, not credits. The old copy claimed 5 credits was
-      // roughly one fix; 5 credits could not cover a single ~10s shot, and it
-      // asked the reader to do arithmetic in an internal unit to find that out.
-      "2 free fixes per month, up to 10 seconds each",
-      "480p output + watermark",
-      "Up to 30-sec uploads",
-      "3 scans / day",
-      "Refund if a fix doesn't land",
-    ],
-    cta: "Get started free",
-    highlight: false,
-  },
-  {
-    id: "starter",
-    name: "Starter",
-    monthly: 9,
-    annual: 7,
-    credits: 20,
-    maxVideo: "5 min",
-    quality: "720p",
-    watermark: false,
-    features: [
-      "Unlimited continuity scans",
-      "20 credits / month (~3 fixes)",
-      "720p output, no watermark",
-      "Up to 5-min uploads",
-      "Refund if a fix doesn't land",
-    ],
-    cta: "Start Starter",
-    highlight: false,
-  },
-  {
-    id: "pro",
-    name: "Pro",
-    monthly: 19,
-    annual: 15,
-    credits: 45,
-    maxVideo: "15 min",
-    quality: "1080p",
-    watermark: false,
-    features: [
-      "Unlimited continuity scans",
-      "45 credits / month (~6–8 fixes)",
-      "1080p output, no watermark",
-      "Up to 15-min uploads",
-      "Full shot chunking for long scenes",
-      "Refund if a fix doesn't land",
-    ],
-    cta: "Start Pro",
-    highlight: true,
-  },
-  {
-    id: "studio",
-    name: "Studio",
-    monthly: 49,
-    annual: 39,
-    credits: 120,
-    maxVideo: "60 min",
-    quality: "1080p",
-    watermark: false,
-    features: [
-      "Unlimited continuity scans",
-      "120 credits / month (~15–20 fixes)",
-      "1080p output, no watermark, priority queue",
-      "Up to 60-min uploads",
-      "Full shot chunking + priority support",
-      "Refund if a fix doesn't land",
-    ],
-    cta: "Start Studio",
-    highlight: false,
-  },
-];
+/**
+ * Credit packs are the only thing sold.
+ *
+ * The starter/pro/studio subscriptions are gone from this page. They were
+ * never the thing people wanted: /pricing drew 2 pageviews in the six days to
+ * 13 September, nobody subscribed, and the single purchase intent in the whole
+ * dataset was a credit pack clicked eleven minutes after a user was blocked on
+ * a video that was too long. The tiers also carried a contradiction the code
+ * itself flagged — the free grant exceeded Starter's — because their real
+ * purpose was fencing limits, not selling capacity.
+ *
+ * Existing subscribers keep their plan and their grant until they cancel; the
+ * billing portal link at the bottom of this page is how they do that.
+ */
+const FREE_TIER = {
+  scanMinutes: 5,
+  scansPerDay: FREE_SCANS_PER_DAY,
+  credits: PLAN_LIMITS.free.creditsPerMonth,
+};
 
 const CREDIT_PACKS = [
   { pack: "10",  price: 10,  credits: 18,  label: "" },
@@ -110,10 +46,8 @@ export default function PricingPage() {
 }
 
 function PricingContent() {
-  const [annual, setAnnual] = useState(false);
   const [loading, setLoading] = useState<string | null>(null);
   const { user } = useAuth();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const success = searchParams.get("success");
   const cancelled = searchParams.get("cancelled");
@@ -172,30 +106,6 @@ function PricingContent() {
     }
   };
 
-  const handlePlanClick = async (planId: string) => {
-    if (planId === "free") { router.push("/"); return; }
-    if (!(await ensureSignedIn())) return;
-
-    setLoading(planId);
-    try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch("/api/stripe/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ plan: planId, interval: annual ? "annual" : "monthly" }),
-      });
-      const data = await res.json();
-      if (data.url) {
-        posthog.capture("plan_selected", { plan: planId, interval: annual ? "annual" : "monthly" });
-        window.location.href = data.url;
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(null);
-    }
-  };
-
   const handleBuyPack = async (pack: string) => {
     if (!(await ensureSignedIn())) return;
     setLoading(`credits_${pack}`);
@@ -251,89 +161,55 @@ function PricingContent() {
             Free accounts need a verified email address before the first fix.
           </p>
 
-          <div className="mt-8 inline-flex items-center gap-3 rounded-full border border-gray-200 bg-gray-50 p-1">
-            <button
-              onClick={() => setAnnual(false)}
-              className={[
-                "px-4 py-1.5 rounded-full text-sm font-medium transition-colors",
-                !annual ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-black",
-              ].join(" ")}
-            >
-              Monthly
-            </button>
-            <button
-              onClick={() => setAnnual(true)}
-              className={[
-                "px-4 py-1.5 rounded-full text-sm font-medium transition-colors flex items-center gap-1.5",
-                annual ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-black",
-              ].join(" ")}
-            >
-              Annual
-              <span className="text-[10px] font-semibold bg-black text-white px-1.5 py-0.5 rounded-full">
-                Save ~20%
-              </span>
-            </button>
-          </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {PLANS.map((plan) => {
-            const price = annual ? plan.annual : plan.monthly;
-            const isLoading = loading === plan.id;
-
-            return (
-              <div
-                key={plan.id}
-                className={[
-                  "rounded-2xl border p-6 flex flex-col",
-                  plan.highlight
-                    ? "border-black bg-black text-white"
-                    : "border-gray-200 bg-white text-black",
-                ].join(" ")}
-              >
-                {plan.highlight && (
-                  <div className="text-[10px] uppercase tracking-widest text-gray-400 font-semibold mb-3">
-                    Recommended
-                  </div>
-                )}
-                <div className="mb-4">
-                  <h2 className="text-lg font-semibold">{plan.name}</h2>
-                  <div className="mt-2 flex items-baseline gap-1">
-                    <span className="text-3xl font-semibold">
-                      {price === 0 ? "Free" : `$${price}`}
-                    </span>
-                    {price > 0 && (
-                      <span className={plan.highlight ? "text-gray-400 text-sm" : "text-gray-500 text-sm"}>
-                        /mo{annual ? " billed annually" : ""}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <ul className="flex flex-col gap-2 mb-6 flex-1">
-                  {plan.features.map((f) => (
-                    <li key={f} className="flex items-start gap-2 text-sm">
-                      <span className="text-gray-400 mt-0.5">✓</span>
-                      <span className={plan.highlight ? "text-gray-200" : "text-gray-700"}>{f}</span>
-                    </li>
-                  ))}
-                </ul>
-
-                <button
-                  onClick={() => handlePlanClick(plan.id)}
-                  disabled={isLoading}
-                  className={[
-                    "w-full py-2.5 rounded-xl font-semibold text-sm transition-colors disabled:opacity-50",
-                    plan.highlight
-                      ? "bg-white text-black hover:bg-gray-100"
-                      : "bg-black text-white hover:bg-gray-800",
-                  ].join(" ")}
-                >
-                  {isLoading ? "Redirecting…" : plan.cta}
-                </button>
-              </div>
-            );
-          })}
+        {/* What you get without paying anything.
+            Stated as a panel rather than a "Free plan" card in a tier grid:
+            there are no tiers to compare it against any more, and the point of
+            this block is to make clear that the expensive, useful half —
+            finding the errors — costs nothing. */}
+        <div className="max-w-md mx-auto rounded-2xl border border-gray-200 bg-white p-6 mb-6">
+          <h2 className="font-semibold text-black text-base mb-1">Free, no card</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Every account starts here.
+          </p>
+          <ul className="flex flex-col gap-2 text-sm">
+            <li className="flex items-start gap-2">
+              <span className="text-gray-400 mt-0.5">✓</span>
+              <span className="text-gray-700">
+                Scan up to{" "}
+                <span className="text-black font-semibold">
+                  {FREE_TIER.scanMinutes} minutes
+                </span>{" "}
+                of video per upload
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-gray-400 mt-0.5">✓</span>
+              <span className="text-gray-700">
+                {FREE_TIER.scansPerDay} scans a day, every day
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-gray-400 mt-0.5">✓</span>
+              <span className="text-gray-700">
+                <span className="text-black font-semibold">
+                  {FREE_TIER.credits} free credits
+                </span>{" "}
+                a month — {FREE_TIER.credits} seconds of fixed output
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-gray-400 mt-0.5">✓</span>
+              <span className="text-gray-700">480p output with a watermark</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-gray-400 mt-0.5">✓</span>
+              <span className="text-gray-700">
+                Refunded automatically if a fix doesn&apos;t land
+              </span>
+            </li>
+          </ul>
         </div>
 
         {/* ── Credit packs ── */}
@@ -341,7 +217,8 @@ function PricingContent() {
           <div className="mb-5">
             <h3 className="font-semibold text-black text-base mb-1">Buy credits one-time</h3>
             <p className="text-sm text-gray-500">
-              No subscription. Stack on top of your plan. Credits never expire.
+              Top up when you need to. Credits never expire and there is nothing
+              to cancel.
             </p>
           </div>
 
@@ -383,7 +260,7 @@ function PricingContent() {
               disabled={portalLoading}
               className="text-sm text-gray-600 underline underline-offset-2 hover:text-black transition-colors disabled:opacity-50"
             >
-              {portalLoading ? "Opening…" : "Manage or cancel your subscription"}
+              {portalLoading ? "Opening…" : "On an old subscription? Manage or cancel it"}
             </button>
             {portalError && (
               <p className="mt-2 text-xs text-amber-700">{portalError}</p>
@@ -392,7 +269,7 @@ function PricingContent() {
         )}
 
         <p className="mt-4 text-center text-xs text-gray-400">
-          Prices in USD. Cancel anytime from Manage subscription above. Monthly credits reset on the 1st.
+          Prices in USD. Credits you buy never expire; the free monthly credits reset on the 1st.
         </p>
 
         <div className="mt-8 text-center space-y-2">

@@ -15,11 +15,28 @@ import DiffPlayer from "@/components/DiffPlayer";
 import ScoreBadge from "@/components/ScoreBadge";
 import ManualMarker from "@/components/ManualMarker";
 import type { Shot, RecentJob, ContinuityError, Job } from "@/lib/types";
+import Link from "next/link";
 import posthog from "posthog-js";
 
 type Props = {
   params: Promise<{ id: string }>;
 };
+
+/**
+ * Seconds as m:ss, or plain seconds under a minute.
+ *
+ * Both sides of the partial-analysis sentence go through here so the analysed
+ * length and the total are never shown in different units — "we scanned 300
+ * seconds of your 8.4 minute video" is two numbers the reader has to reconcile
+ * themselves, on the screen where they decide whether to pay.
+ */
+function formatClock(seconds: number): string {
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return s === 0 ? `${m}:00` : `${m}:${String(s).padStart(2, "0")}`;
+}
 
 function getDownloadFilename(job: Job): string {
   const rawPath = job.inputVideoUrl?.split("/o/")[1]?.split("?")[0] ?? "";
@@ -169,8 +186,21 @@ export default function JobPage({ params }: Props) {
     typeof job.fixingStartedAt === "number" &&
     Date.now() - job.fixingStartedAt > FIXING_TIMEOUT_MS;
 
+  // Three independent reasons to withhold the "after" score, because there
+  // are three independent ways it has been wrong:
+  //   - it was never written;
+  //   - the per-error verification says nothing actually landed;
+  //   - the verify pass resolved a different shot structure than the input
+  //     had, so the number is not comparable at all (one shot means no pairs,
+  //     detection finds nothing, and the score reads 100 regardless).
+  // The last is only knowable from scoreAfterReliable, which jobs written
+  // before it existed do not carry — and those are exactly the jobs whose
+  // flattering before/after numbers were the artifact. So `=== false` is
+  // deliberately not used here: undefined is not trusted either.
   const showScoreAfter =
-    job?.scoreAfter !== undefined && job?.verificationPassed !== false;
+    job?.scoreAfter !== undefined &&
+    job?.verificationPassed !== false &&
+    job?.scoreAfterReliable !== false;
 
   const monthlyLimit = PLAN_LIMITS[userPlan].creditsPerMonth;
   const quotaExhausted = user ? (fixesUsed >= monthlyLimit && creditsBalance <= 0) : false;
@@ -336,6 +366,41 @@ export default function JobPage({ params }: Props) {
           </div>
         )}
       </div>
+
+      {/* Partial analysis.
+          Replaces what used to be a hard rejection: a video over the free
+          analysis budget was refused outright with "Video too long — upgrade
+          your plan", which between 8 and 13 September turned away 6 of 20
+          jobs and 4 of the 8 people who ever uploaded anything. One user
+          uploaded the same 64.6s file twice and left. Now the affordable
+          portion is analysed and the findings shown, and this states the
+          boundary honestly rather than implying the whole video was checked. */}
+      {job.analysisTruncated && job.analysedSeconds && job.totalSeconds && (
+        <div className="mb-6 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+          <p className="text-sm text-blue-900 font-semibold mb-1">
+            Scanned the first {formatClock(job.analysedSeconds)} of{" "}
+            {formatClock(job.totalSeconds)}
+          </p>
+          <p className="text-xs text-blue-800">
+            Everything below is real and fixable. The remaining{" "}
+            {formatClock(job.totalSeconds - job.analysedSeconds)} hasn&apos;t been
+            analysed yet — add credits to scan the rest of this video.
+          </p>
+          <Link
+            href="/pricing"
+            className="inline-block mt-2 text-xs font-semibold text-blue-900 underline underline-offset-2 hover:opacity-70"
+            onClick={() =>
+              posthog.capture("scan_rest_clicked", {
+                job_id: jobId,
+                analysed_s: job.analysedSeconds,
+                total_s: job.totalSeconds,
+              })
+            }
+          >
+            Scan the rest →
+          </Link>
+        </div>
+      )}
 
       {/* Beta notice */}
       <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4">

@@ -63,7 +63,22 @@ def restitch(job_id: str) -> str:
     # comes back is longer than the shot and starts earlier than it. Splicing
     # that in whole would replace the shot with a longer segment and push every
     # following segment out of sync with the audio.
-    fixed_clips: dict[str, tuple[str, float, float]] = {}
+    # shotId -> (fixedAt, url, lead-in, span). The FIRST element is the sort
+    # key and exists because this map used to be built by plain assignment in
+    # document order, so with two fixed errors on one shot the winner was
+    # whichever Firestore happened to return last.
+    #
+    # Fixes on a shot chain — each starts from the previous one's output — so
+    # only the MOST RECENT clip contains all of them. Picking any earlier one
+    # silently drops every fix that came after it, while the job still reports
+    # them verified, because each error is verified against its own output
+    # rather than against what was delivered.
+    #
+    # Observed live on 14 Sep: shot 2 had a wardrobe fix at 14:39:53 and an
+    # atmosphere fix chained onto it at 14:44:35. Document order put the
+    # wardrobe clip last, so the delivered video had the outfits corrected and
+    # the rain back, on a job reporting 3 of 3 verified.
+    _best: dict[str, tuple] = {}
     for err_doc in errors_snap:
         err = err_doc.to_dict()
         if err.get("fixStatus") == "fixed" and err.get("fixedClipUrl"):
@@ -76,11 +91,25 @@ def restitch(job_id: str) -> str:
                 except (TypeError, ValueError):
                     return 0.0
 
-            fixed_clips[target_shot] = (
-                err["fixedClipUrl"],
-                _num("clipLeadInSeconds"),
-                _num("clipSpanSeconds"),
-            )
+            # Jobs fixed before fixedAt existed have none; they sort first and
+            # so lose to any clip that does carry one, which is the safe
+            # direction — a timestamped clip is always the later work.
+            fixed_at = err.get("fixedAt")
+            sort_key = fixed_at.timestamp() if hasattr(fixed_at, "timestamp") else 0.0
+
+            prior = _best.get(target_shot)
+            if prior is None or sort_key >= prior[0]:
+                _best[target_shot] = (
+                    sort_key,
+                    err["fixedClipUrl"],
+                    _num("clipLeadInSeconds"),
+                    _num("clipSpanSeconds"),
+                )
+
+    fixed_clips: dict[str, tuple[str, float, float]] = {
+        shot: (url, lead_in, span)
+        for shot, (_, url, lead_in, span) in _best.items()
+    }
 
     with tempfile.TemporaryDirectory() as tmp:
         video_local = os.path.join(tmp, "original.mp4")

@@ -27,9 +27,24 @@ async function getUidFromRequest(req: NextRequest): Promise<string | null> {
 async function calcCreditsNeeded(
   jobId: string
 ): Promise<{ total: number; perError: Map<string, number>; confirmedCount: number }> {
+  // The SAME limit run_fix_phase applies in modal_app/app.py, and the same
+  // query shape, so the two agree on which errors are in play.
+  //
+  // Without it this route charged for every confirmed error while the pipeline
+  // only ever attempted the first MAX_ERRORS_PER_FIX. A user confirming the 20
+  // repairable findings on a 14-shot video paid for 20, had 8 attempted, and
+  // the remaining 12 were never run and never refunded — the refund path only
+  // fires on a fix that actually ran and failed.
+  //
+  // Keep this in step with MAX_ERRORS_PER_FIX in modal_app/app.py. They cannot
+  // share a constant across the Python/TypeScript boundary, so they are
+  // deliberately written the same way and cross-referenced in both files.
+  const MAX_ERRORS_PER_FIX = 8;
+
   const [errorsSnap, shotsSnap] = await Promise.all([
     adminDb.collection("jobs").doc(jobId).collection("errors")
       .where("userConfirmed", "==", true)
+      .limit(MAX_ERRORS_PER_FIX)
       .get(),
     adminDb.collection("jobs").doc(jobId).collection("shots").get(),
   ]);

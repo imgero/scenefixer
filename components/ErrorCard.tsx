@@ -368,7 +368,32 @@ export default function ErrorCard({
       {!collapsed && (
         <>
           {/* Description */}
-          <p className="text-gray-900 text-sm mb-4">{error.description}</p>
+          <p className="text-gray-900 text-sm mb-2">{error.description}</p>
+
+          {/* Other findings folded into this one.
+              Detection reports a systemic defect once per shot pair that shows
+              it, so the same changing dress came back three times on one shot,
+              each compared against a different earlier shot. They are one edit
+              and are charged once — but they are still shown, because the user
+              should see everything that was found, not a number that quietly
+              got smaller. */}
+          {(error.mergedCount ?? 1) > 1 && (
+            <details className="mb-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+              <summary className="text-xs text-gray-600 cursor-pointer select-none">
+                +{(error.mergedCount ?? 1) - 1} related finding
+                {(error.mergedCount ?? 1) - 1 === 1 ? "" : "s"} on this shot —
+                fixed by the same edit
+              </summary>
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {(error.mergedDescriptions ?? []).map((d, i) => (
+                  <li key={i} className="text-xs text-gray-600 flex gap-2">
+                    <span className="text-gray-400">·</span>
+                    <span>{d}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
 
           {/* Action row */}
           <div className="mb-4">

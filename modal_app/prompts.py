@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+import math
+
+
 DETECTION_PROMPT = """You are reviewing two shots from a video project. These may be from a traditional film shoot or from AI-generated clips (Runway, Veo, Kling, Sora, Pika, or others).
 
 You will see multiple frames per shot (typically 3 frames sampled at 25% / 50% / 75% of each shot's duration). Frames labelled "SHOT A" are the earlier shot — the reference. Frames labelled "SHOT B" are the shot under review.
@@ -38,7 +43,11 @@ Rules:
 - DO NOT flag subtle lighting shifts clearly caused by camera angle (shadows from a different direction, natural exposure shift when pointing toward a window). DO flag significant mood or grade differences that would be noticeable on a cut.
 - DO NOT flag both "atmosphere" and "lighting" for the same root cause. If a lighting mismatch is a direct consequence of an environment/atmosphere change (e.g. desert sunset → overcast shoreline makes everything warmer→cooler), flag it as "atmosphere" only. Only flag "lighting" independently if the environment is the same but the color grade or exposure differs.
 - DO NOT flag action progression (characters moved naturally), extras repositioning, or intentional scene transitions.
-- If A and B are clearly MEANT to be different scenes (an intentional narrative cut: flashback, time jump, cutaway to a different day or storyline), return {"errors": [], "different_scene": true}. IMPORTANT: for AI-generated footage, dramatically different backgrounds (desert vs. rocky shoreline, different weather, different time of day) within the same sequence are usually generation inconsistencies, NOT intentional cuts. If the shots share a subject (e.g. same character/astronaut), flag the background mismatch as an "atmosphere" error rather than returning different_scene: true.
+- different_scene means ONLY "these two shots are not supposed to MATCH IN LOOK". It does NOT mean "stop looking". Set it true when the two shots are a deliberate narrative cut, then CARRY ON and report any object-level errors you can still see. A character whose jacket changes colour is a continuity error whether or not the scene changed around them.
+  Set different_scene: true only when you can point to POSITIVE evidence of an intentional cut — a different location with a different cast, a title/time card, an obvious flashback grade, a scene that plainly happens elsewhere or elsewhen in the story.
+  Shots merely LOOKING different is NOT that evidence. For AI-generated footage, dramatically different backgrounds, weather, time of day or render style within one sequence are usually generation inconsistencies, NOT intentional cuts. If in any doubt, set different_scene: false and flag the mismatch as an "atmosphere" or "lighting" error — a wrong flag costs the user one dismissed row, whereas a wrong different_scene hides every problem in the pair and reports broken footage as clean.
+  If the shots share a subject (the same character, the same room, the same object), that is strong evidence they are the SAME scene. Set different_scene: false.
+- When different_scene is true, still return object-level errors (prop, wardrobe, hair, set_dressing) in "errors". Only omit lighting / atmosphere / style errors, since those describe a look the two shots were never meant to share.
 - Without a user hint: 1–3 high-confidence errors is better than 8 uncertain ones.
 - With a user hint at the top: trust it and flag what they described.
 
@@ -102,7 +111,9 @@ Return STRICT JSON only:
   ]
 }
 
-If no errors: {"different_scene": false, "errors": []}"""
+If no errors: {"different_scene": false, "errors": []}
+
+Remember: different_scene: true still expects any object-level errors you can see in "errors". An empty list there means you genuinely could not find one."""
 
 
 STANDALONE_PROMPT = """You are reviewing keyframes from a SINGLE SHOT of a film for things that don't belong in the scene's world.
@@ -484,7 +495,54 @@ def _build_remove_prompt(fix: str, obj_phrase: str, has_marker: bool) -> str:
     )
 
 
-def compute_continuity_score(errors: list) -> int:
-    high_count = sum(1 for e in errors if e.get("severity") == "high")
-    score = max(0, 100 - (len(errors) * 8) - (high_count * 5))
-    return score
+# Weight per severity. A high-severity error should move the score more than
+# three low ones, which a flat per-error subtraction could not express.
+SEVERITY_WEIGHT = {"high": 3.0, "medium": 1.5, "low": 0.75}
+
+# Tuning constant for the decay curve below. Raising it makes scores more
+# forgiving. 3.0 was chosen against the ten real user jobs from 8–13 Sep:
+# it spreads them across 25–78 where the old formula clustered them at 0–31.
+_SCORE_DECAY = 3.0
+
+# No analysed video scores zero. A score of 0 reads as "your footage is
+# worthless" and is never the message — even a badly broken clip has a
+# repairable subset. The floor is the honest bottom of the scale.
+_SCORE_FLOOR = 5
+
+
+def compute_continuity_score(errors: list, shot_count: int | None = None) -> int:
+    """
+    Score a video's continuity from 0–100, as error DENSITY rather than count.
+
+    The previous formula was `100 - errors*8 - high*5`, which floored at zero
+    from 13 errors up. Once shot detection was fixed on 2026-09-09 and real
+    videos started resolving into ten or more shots, that was nearly every
+    honestly-analysed video: five of the ten real user jobs in the 8–13 Sep
+    window scored 0, 10, 13, 29 and 31, and two users were shown a flat 0 on
+    their own footage. A count-based penalty also punished long videos for
+    being long — fifteen shots have more opportunities to disagree than two,
+    and finding proportionally fewer errors across them is a better result,
+    not a worse one.
+
+    So the input is weighted error density per shot, and the curve is
+    exponential decay: steep where it matters (the first couple of errors per
+    shot really are the difference between usable and not), gentle in the
+    tail, asymptotic to the floor rather than crashing into it.
+
+    `shot_count` is optional only so callers written before it existed keep
+    working; pass it wherever it is known. The denominator has a floor of 2 so
+    a single-shot video is not scored twice as harshly as a two-shot one for
+    the same finding.
+    """
+    if not errors:
+        return 100
+
+    weight = sum(
+        SEVERITY_WEIGHT.get(str(e.get("severity") or "medium").lower(), 1.5)
+        for e in errors
+    )
+    shots = max(2, shot_count or len(errors))
+    density = weight / shots
+
+    score = 100 * math.exp(-density / _SCORE_DECAY)
+    return max(_SCORE_FLOOR, min(100, round(score)))

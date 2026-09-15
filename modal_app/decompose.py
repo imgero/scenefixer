@@ -3,6 +3,13 @@ Phase 2 — Decompose video into shots and extract keyframes.
 Runs in Modal with FFmpeg + PySceneDetect.
 """
 
+# The container is 3.11 but the local interpreter is 3.9, and `str | None` in a
+# signature is evaluated at import time. This module has survived without the
+# guard only because it is imported lazily from inside Modal functions rather
+# than at deploy time; anything that imports it locally — a test, a script —
+# hits the TypeError. Same reason app.py and diagnose.py carry this.
+from __future__ import annotations
+
 import os
 import hashlib
 import math
@@ -174,26 +181,54 @@ def upload_keyframe(local_path: str, storage_path: str) -> str:
 KEYFRAME_OFFSETS = (0.10, 0.30, 0.50, 0.70, 0.90)  # 5 keyframes per shot — covers edges where reveals/occlusions happen
 
 
-_MAX_VIDEO_MINUTES: dict[str, float] = {
-    "free": 0.5, "starter": 5, "pro": 15, "studio": 60,
+# Seconds of video analysed without spending credits, per plan.
+#
+# This replaces _MAX_VIDEO_MINUTES as a REJECTION threshold. Between 8 and 13
+# September the 30-second free cap rejected 6 of 20 jobs outright and hit 4 of
+# the 8 users who ever uploaded anything — the single largest drop-off in the
+# product. The rejected durations cluster at 35s, 64.6s, 64.6s, 66.9s and 68s:
+# people are uploading roughly one-minute clips, which is the natural length of
+# the thing they want fixed, and the ceiling was under half of it. One user
+# uploaded the same 64.62s file twice, five minutes apart, and left.
+#
+# So length is no longer a wall. A video longer than the budget is ANALYSED UP
+# TO the budget and the user is shown the findings for that portion, with the
+# boundary stated and the rest offered. A partial result converts; a rejection
+# cannot.
+#
+# The ceiling is real money, not a product tier: analysis is Claude vision plus
+# Grounding DINO, billed to us per scan, whereas fixes draw on a prepaid Runway
+# balance. Measured at Opus 4.8's $5/$25 per Mtok, a 60s five-shot video costs
+# about $1.30 to analyse and MAX_PAIRS=60 caps the dominant term — but the
+# per-shot standalone call and the holistic call are uncapped, so cost still
+# grows with length. 300s is the point where the worst case stays near $5.
+_FREE_ANALYSIS_SECONDS: dict[str, float] = {
+    "free": 300, "starter": 900, "pro": 1800, "studio": 3600,
 }
 
 
-def _fmt_duration(seconds: float, force_seconds: bool = False) -> str:
+def trim_video(input_path: str, output_path: str, seconds: float) -> str:
     """
-    Human duration for the length-limit message.
+    Cut the first `seconds` of a video, re-encoding so the cut lands exactly.
 
-    A 30-second cap rendered as "0.5 min" against a 31-second clip rendered as
-    "1.3 min" read as a contradiction — two numbers that look unrelated, on the
-    last screen a user sees before deciding whether to pay. Both sides of the
-    comparison go through here, and `force_seconds` keeps them in the same unit
-    when the cap is under a minute, so a 30-second limit is never compared
-    against a duration expressed in minutes.
+    Stream-copy (-c copy) would be faster but can only cut on a keyframe, which
+    on a long GOP drifts the boundary by seconds. The analysed length is shown
+    to the user and charged against a budget, so it has to be the length we say
+    it is.
     """
-    if force_seconds or seconds < 60:
-        return f"{int(math.ceil(seconds))} seconds"
-    minutes = seconds / 60
-    return f"{minutes:.1f} minutes" if minutes % 1 else f"{int(minutes)} minutes"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-t", f"{seconds:.3f}",
+            "-c:v", "libx264", "-crf", "23",
+            "-c:a", "aac",
+            output_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return output_path
+
 
 
 def run_decompose(job_id: str) -> int:
@@ -214,7 +249,7 @@ def run_decompose(job_id: str) -> int:
         else:
             user_plan = "free"  # beta users get free-tier limits
 
-        max_minutes = _MAX_VIDEO_MINUTES.get(user_plan, 5)
+        budget_seconds = _FREE_ANALYSIS_SECONDS.get(user_plan, 300)
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", raw_path],
@@ -222,43 +257,45 @@ def run_decompose(job_id: str) -> int:
         )
         try:
             duration_s = float(probe.stdout.strip())
-            max_seconds = max_minutes * 60
             # Compare whole seconds. An export lands a few frames past a round
             # number all the time — 30.13s and 30.21s were both rejected
             # against a 30s cap — and "your 30 second video is too long for
             # your 30 second limit" is not a defensible thing to tell someone
             # who has just sat through the upload. Anything that rounds down to
-            # the cap is inside it; the fix pipeline works per shot, so a
+            # the budget is inside it; the fix pipeline works per shot, so a
             # fraction of a second over changes nothing downstream.
-            if math.floor(duration_s) > max_seconds:
-                # Both sides through _fmt_duration so the cap and the actual
-                # length are always in the same unit. Ceiling the duration also
-                # keeps the two from printing equal on a strictly-greater
-                # comparison (a 30.2s clip against a 30s cap).
+            if math.floor(duration_s) > budget_seconds:
+                # Not an error. Analyse the affordable prefix, and record both
+                # numbers so the UI can state the boundary and offer the rest.
+                trimmed = os.path.join(tmp, "budgeted.mp4")
+                trim_video(raw_path, trimmed, budget_seconds)
+                raw_path = trimmed
+
                 job_ref.update({
-                    "status": "error",
-                    "errorMessage": (
-                        f"Video too long — your {user_plan} plan supports up to "
-                        f"{_fmt_duration(max_seconds)}, but this video is "
-                        f"{_fmt_duration(duration_s, force_seconds=max_seconds < 60)}. "
-                        f"Upgrade your plan to process longer videos."
-                    ),
+                    "analysisTruncated": True,
+                    "analysedSeconds": round(budget_seconds, 2),
+                    "totalSeconds": round(duration_s, 2),
                 })
 
                 from modal_app import analytics
                 analytics.capture(
                     job_id,
-                    "job_analysis_rejected",
+                    "job_analysis_truncated",
                     {
-                        "reason": "video_too_long",
+                        "reason": "analysis_budget",
                         "duration_s": round(duration_s, 2),
-                        "max_minutes": max_minutes,
-                        "max_seconds": int(max_seconds),
+                        "analysed_s": round(budget_seconds, 2),
+                        "remaining_s": round(duration_s - budget_seconds, 2),
                         "plan": user_plan,
                     },
                     job=job,
                 )
-                return 0
+            else:
+                job_ref.update({
+                    "analysisTruncated": False,
+                    "analysedSeconds": round(duration_s, 2),
+                    "totalSeconds": round(duration_s, 2),
+                })
         except (ValueError, AttributeError):
             pass
 

@@ -21,12 +21,39 @@ export type Job = {
   watermark?: boolean;
   scoreBefore?: number;
   scoreAfter?: number;
+  /**
+   * Whether scoreAfter is comparable to scoreBefore.
+   *
+   * False when the verify pass resolved a different shot structure than the
+   * input had (one shot means no pairs, so detection finds nothing and the
+   * score comes back 100 regardless), or when nothing verified yet the score
+   * rose anyway. Absent on jobs written before this existed — and those are
+   * exactly the jobs whose flattering before/after numbers cannot be trusted,
+   * so treat undefined as "unknown", never as "reliable".
+   */
+  scoreAfterReliable?: boolean;
+  /** Why the after-score is missing or unchanged, when it is. */
+  scoreAfterNote?: string;
   shotCount: number;
   /** Shots with usable keyframes. Absent on jobs written before this field
    *  existed; treat undefined as "equal to shotCount". */
   shotsAnalyzed?: number;
   errorCount: number;
   fixedCount: number;
+  /**
+   * Analysis stopped at the free budget rather than covering the whole video.
+   *
+   * Replaces the old hard rejection. A video longer than the plan's analysis
+   * budget is scanned up to that budget and the findings shown, with the
+   * boundary stated and the remainder offered for credits. Absent on jobs
+   * written before this existed — treat undefined as "fully analysed", which
+   * is what those jobs were, since anything longer was rejected outright.
+   */
+  analysisTruncated?: boolean;
+  /** Seconds of the video actually analysed. */
+  analysedSeconds?: number;
+  /** Full duration of the uploaded video. */
+  totalSeconds?: number;
   /** Per-run fix outcomes. Absent on jobs written before these existed.
    *
    *  A job where every fix threw is written as "error", not "done". But a fix
@@ -120,6 +147,18 @@ export type ContinuityError = {
   repairable?: boolean;
   notRepairableReason?: string;
   /**
+   * How many detected findings this error represents.
+   *
+   * Detection reports a systemic defect once per shot pair that happens to
+   * show it — a video whose characters change clothes throughout produced
+   * twelve separate wardrobe errors, three of them on one shot. Those are
+   * collapsed to one error per (shot, defect class), because they are one
+   * edit. Absent or 1 means nothing was merged.
+   */
+  mergedCount?: number;
+  /** The other findings' descriptions, so none is hidden from the user. */
+  mergedDescriptions?: string[];
+  /**
    * Written by Claude when a fix failed for a reason nothing in the pipeline
    * anticipated — a provider changing what it accepts, an unusual file, a new
    * limit. `message` is shown to the user verbatim in place of the raw
@@ -155,23 +194,47 @@ export type RecentJob = {
 
 export type Plan = "free" | "starter" | "pro" | "studio";
 
+/**
+ * Seconds of video analysed for free per upload, by plan.
+ *
+ * Must stay in step with `_FREE_ANALYSIS_SECONDS` in modal_app/decompose.py,
+ * which is where it is actually enforced. This copy exists so the UI can state
+ * the budget before an upload rather than after.
+ */
+export const FREE_ANALYSIS_SECONDS: Record<Plan, number> = {
+  free: 300, starter: 900, pro: 1800, studio: 3600,
+};
+
+/** Free scans per day before a scan draws on credits. */
+export const FREE_SCANS_PER_DAY = 3;
+
 export const PLAN_LIMITS: Record<Plan, {
   creditsPerMonth: number;  // seconds of Runway output included per month
-  maxVideoMinutes: number;
   qualityLabel: string;
   watermark: boolean;
 }> = {
-  // 30 = two complete 10-second fixes with headroom. At 5 credits a single
-  // ~10s shot cost 11 and no free user could ever finish one fix.
-  free:    { creditsPerMonth: 30,  maxVideoMinutes: 0.5, qualityLabel: "480p",  watermark: true  },
-  // NOTE: free (30) now exceeds starter (20). Deliberate for this deploy —
-  // paid grants are frozen until ~20 real fixes give a measured cost-per-fix
-  // to reprice from. Starter still differentiates on 720p, no watermark and
-  // 5-minute uploads, but the headline credit number is inverted and should
-  // not survive the reprice.
-  starter: { creditsPerMonth: 20,  maxVideoMinutes: 5,  qualityLabel: "720p",  watermark: false },
-  pro:     { creditsPerMonth: 45,  maxVideoMinutes: 15, qualityLabel: "1080p", watermark: false },
-  studio:  { creditsPerMonth: 120, maxVideoMinutes: 60, qualityLabel: "1080p", watermark: false },
+  // 90 credits = 90 seconds of fixed output a month.
+  //
+  // Deliberately generous, and the generosity is close to free: fixes draw on
+  // a PREPAID Runway balance (230,812 credits sitting unused as of 13 Sep), so
+  // the marginal cash cost of a fix is zero — the money is already spent. What
+  // costs live cash is analysis (Claude vision, billed per scan), and that is
+  // bounded separately by FREE_ANALYSIS_SECONDS and FREE_SCANS_PER_DAY.
+  //
+  // The objective right now is successful fixes and downloads, not revenue.
+  // Only 2 of 8 fix attempts in the 8-13 Sep window ever verified, and no user
+  // has yet downloaded a video this product demonstrably repaired. Until that
+  // happens the grant should not be what stops anyone, and it can be cut once
+  // there is something to protect.
+  free:    { creditsPerMonth: 90,  qualityLabel: "480p",  watermark: true  },
+  // Legacy subscription tiers. No longer sold — the pricing page is credit
+  // packs only — but existing subscribers keep their grant until they cancel,
+  // so these must keep resolving. The old free-30 > starter-20 inversion is
+  // gone now that free is 90; these are kept above it in quality terms only
+  // (720p+, no watermark), which is what they always really differentiated on.
+  starter: { creditsPerMonth: 120, qualityLabel: "720p",  watermark: false },
+  pro:     { creditsPerMonth: 300, qualityLabel: "1080p", watermark: false },
+  studio:  { creditsPerMonth: 800, qualityLabel: "1080p", watermark: false },
 };
 
 export type UserDoc = {

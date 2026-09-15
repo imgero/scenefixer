@@ -100,6 +100,18 @@ def _refund_daily_scan(owner_uid: str | None) -> bool:
     return False
 
 
+# Every secret named here must already exist, or `modal deploy` fails before it
+# starts. So adding one is a deploy-breaking change until it is created.
+#
+# TO TURN ON OUTCOME EMAILS (modal_app/notify.py), two steps, in this order:
+#   1. modal secret create loops-api-key \
+#        LOOPS_API_KEY=... LOOPS_OWNER_TRANSACTIONAL_ID=...
+#   2. add `modal.Secret.from_name("loops-api-key"),` to this list AND to
+#      FIX_SECRETS below, then redeploy.
+# Until then notify.py finds no key and no-ops silently — which is exactly
+# what lib/notify.ts did on the web side from the day it was written, because
+# it called Resend and RESEND_API_KEY is set in no environment at all. Both
+# sides now go through Loops, whose key already exists and already works.
 ANALYSIS_SECRETS = [
     modal.Secret.from_name("firebase-admin-key"),
     modal.Secret.from_name("anthropic-api-key"),
@@ -136,12 +148,17 @@ def run_process_job(job_id: str):
 
         shot_count = run_decompose(job_id)
 
-        # run_decompose signals a terminal rejection (e.g. the video exceeds the
-        # plan length limit) by writing status:"error" + errorMessage and
-        # returning 0, deliberately without raising — raising would change the
-        # failure semantics of every other decompose path. Detect must not run
-        # in that case: it would find zero shots and overwrite the status with
-        # "awaiting_confirmation", discarding the errorMessage the user needs.
+        # run_decompose signals a terminal rejection by writing status:"error"
+        # + errorMessage and returning 0, deliberately without raising —
+        # raising would change the failure semantics of every other decompose
+        # path. Detect must not run in that case: it would find zero shots and
+        # overwrite the status with "awaiting_confirmation", discarding the
+        # errorMessage the user needs.
+        #
+        # Video length is NO LONGER one of these rejections. A video longer
+        # than the analysis budget is trimmed to it and analysed normally; see
+        # _FREE_ANALYSIS_SECONDS in decompose.py. This branch still guards
+        # genuine decompose failures (an unreadable file, a download that died).
         if shot_count == 0:
             from modal_app.firebase import get_db
             current = get_db().collection("jobs").document(job_id).get().to_dict() or {}
@@ -184,6 +201,32 @@ def run_process_job(job_id: str):
             },
             job=current,
         )
+
+        try:
+            from modal_app import notify
+            notify.analysis_failed(
+                job_id,
+                job=current,
+                reason=(
+                    "upstream provider outage (ours, not the user's)"
+                    if outage
+                    else f"{type(e).__name__}: {e}"
+                ),
+                detail=(
+                    f"Phase: {'detect' if current.get('shotCount') else 'decompose'}\n"
+                    f"Shots at failure: {current.get('shotCount', 0)}\n"
+                    f"Free daily scan refunded: {scan_refunded}\n\n"
+                    + (
+                        "The user was shown a neutral 'try again shortly' "
+                        "message, not the provider's text."
+                        if outage
+                        else f"The user was shown: {e}"
+                    )
+                ),
+            )
+        except Exception as exc:
+            print(f"analysis_failed notify failed: {exc}")
+
         # Detached: there is no caller to receive an HTTP error. The job
         # document already carries the failure, which is what the UI reads.
         raise
@@ -197,6 +240,7 @@ FIX_SECRETS = [
     # Without this the fix_completed cost event silently no-ops —
     # analytics._get_client() returns None when POSTHOG_API_KEY is absent.
     modal.Secret.from_name("posthog-api-key"),
+    # Outcome emails: add loops-api-key here too — see ANALYSIS_SECRETS.
 ]
 
 
@@ -227,6 +271,10 @@ def run_fix_phase(job_id: str):
         from modal_app.verify import run_verify
 
         db = get_db()
+        # Mirrored in app/api/jobs/[id]/fix/route.ts (calcCreditsNeeded). If
+        # these two drift, the user is charged for work this loop never does:
+        # the route used to have no limit at all, so confirming 20 errors cost
+        # 20 and ran 8, with the other 12 neither attempted nor refunded.
         MAX_ERRORS_PER_FIX = 8
         errors_snap = (
             db.collection("jobs").document(job_id).collection("errors")
@@ -242,6 +290,27 @@ def run_fix_phase(job_id: str):
         errors_snap = [
             d for d in errors_snap if d.to_dict().get("repairable") is not False
         ]
+
+        # Order matters now that fixes on one shot CHAIN — each starts from the
+        # previous one's output rather than the original footage (see
+        # _prior_fixed_clip in fix.py). Grouping by shot keeps a shot's fixes
+        # adjacent so the chain is unbroken, and putting the whole-clip regrade
+        # LAST means the final pass unifies the colour of whatever the object
+        # edits changed, rather than an object being pasted in after the grade
+        # was already settled.
+        _GRADE_LAST = {"lighting", "atmosphere"}
+
+        def _fix_order(doc):
+            err = doc.to_dict()
+            target = (
+                err.get("shotBId")
+                if err.get("fixDirection", "aTob") == "aTob"
+                else err.get("shotAId")
+            )
+            is_grade = str(err.get("type") or "").lower() in _GRADE_LAST
+            return (str(target), 1 if is_grade else 0)
+
+        errors_snap.sort(key=_fix_order)
         if not errors_snap:
             db.collection("jobs").document(job_id).update({
                 "status": "awaiting_confirmation",
@@ -324,6 +393,20 @@ def run_fix_phase(job_id: str):
                 )
             except Exception as exc:
                 print(f"fix_job_failed capture failed: {exc}")
+            try:
+                from modal_app import notify
+                notify.fix_finished(
+                    job_id,
+                    job=db.collection("jobs").document(job_id).get().to_dict(),
+                    attempted=attempted,
+                    verified=0,
+                    unverified=0,
+                    failed=len(failed),
+                    credits_refunded=credits_refunded,
+                    reasons=[f["message"] for f in failed][:8],
+                )
+            except Exception as exc:
+                print(f"fix_job_failed notify failed: {exc}")
             return {"ok": False, "attempted": attempted, "verified": 0, "failed": len(failed)}
 
         db.collection("jobs").document(job_id).update({"status": "verifying"})
@@ -340,7 +423,39 @@ def run_fix_phase(job_id: str):
         # back verified, and the UI shows the unfixed state off that flag rather
         # than off status.
         verification_passed = len(verified) > 0
-        db.collection("jobs").document(job_id).update({
+
+        # A run that made the video WORSE has not passed, whatever the
+        # per-error verifier says.
+        #
+        # Those two checks answer different questions. The per-error verifier
+        # asks "is this specific error gone from this specific clip?" — it
+        # never looks at the delivered film. scoreAfter re-runs detection over
+        # the whole output, so it is the only thing that can see damage a fix
+        # caused somewhere else.
+        #
+        # On 14 Sep they disagreed: 2 of 3 fixes verified, so the job reported
+        # success, while scoreBefore 61 -> scoreAfter 47 because the third fix
+        # had blurred the footage and recoloured the furniture. The user would
+        # have been told their video was fixed while holding one that was worse
+        # than what they uploaded. When the two disagree, the one that looked
+        # at the whole video wins.
+        fresh_scores = db.collection("jobs").document(job_id).get().to_dict() or {}
+        _before = fresh_scores.get("scoreBefore")
+        _after = fresh_scores.get("scoreAfter")
+        if (
+            verification_passed
+            and fresh_scores.get("scoreAfterReliable") is not False
+            and isinstance(_before, (int, float))
+            and isinstance(_after, (int, float))
+            and _after < _before
+        ):
+            print(
+                f"Overall score fell {_before} -> {_after} despite "
+                f"{len(verified)} verified fix(es); marking the run not passed"
+            )
+            verification_passed = False
+
+        done_update = {
             "status": "done",
             "fixesAttempted": attempted,
             "fixesVerified": len(verified),
@@ -348,7 +463,32 @@ def run_fix_phase(job_id: str):
             "fixesFailed": len(failed),
             "verificationPassed": verification_passed,
             "creditsRefunded": credits_refunded,
-        })
+        }
+
+        # Backstop on the same contradiction verify.py guards at the source: a
+        # run where not one error came back verified cannot also have improved
+        # the score. verify.py catches the case where the output's shot
+        # structure made the comparison invalid; this catches everything else,
+        # including detection simply not re-finding an error it originally
+        # reported. Either way the user must not be shown a rise they did not
+        # get — 31 -> 100 on a run that fixed nothing is the exact shape to
+        # prevent.
+        if not verification_passed:
+            fresh = db.collection("jobs").document(job_id).get().to_dict() or {}
+            before = fresh.get("scoreBefore")
+            after = fresh.get("scoreAfter")
+            if before is not None and after is not None and after > before:
+                print(
+                    f"Suppressing scoreAfter {after} > scoreBefore {before} on a "
+                    f"run with 0 verified fixes"
+                )
+                done_update["scoreAfter"] = before
+                done_update["scoreAfterReliable"] = False
+                done_update["scoreAfterNote"] = (
+                    "No fix was verified on this run, so the score is unchanged."
+                )
+
+        db.collection("jobs").document(job_id).update(done_update)
 
         if not verification_passed or failed:
             try:
@@ -367,6 +507,25 @@ def run_fix_phase(job_id: str):
                 )
             except Exception as exc:
                 print(f"fix job outcome capture failed: {exc}")
+
+        # Emailed on EVERY terminal fix run, not only the bad ones. A run where
+        # everything verified is the outcome this product has been trying to
+        # produce since launch and has managed twice; it should not be the one
+        # case that arrives silently.
+        try:
+            from modal_app import notify
+            notify.fix_finished(
+                job_id,
+                job=db.collection("jobs").document(job_id).get().to_dict(),
+                attempted=attempted,
+                verified=len(verified),
+                unverified=len(unverified),
+                failed=len(failed),
+                credits_refunded=credits_refunded,
+                reasons=[f["message"] for f in failed][:8],
+            )
+        except Exception as exc:
+            print(f"fix job outcome notify failed: {exc}")
 
         return {
             "ok": True,

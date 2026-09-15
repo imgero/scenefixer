@@ -13,9 +13,11 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 
 import anthropic
 import requests
@@ -111,6 +113,27 @@ def choose_engine(shot_dur: float, is_wholeclip: bool, override: str | None = No
     # Any engine can take any length now — a shot longer than the engine's own
     # input limit is split and rejoined by _fix_long_shot_chunked.
     if override and override in FIX_ENGINES:
+        # ...with one refusal. aleph2 must never take whole-clip grade work,
+        # even when explicitly asked for.
+        #
+        # The ask is not hypothetical: when Runway's content moderation blocks a
+        # gemini regrade, diagnose.py offers the user a "Try another engine"
+        # button, and the only other engine here is aleph2. Taking that path on
+        # 14 Sep re-rendered a 28-second clip into something the verifier
+        # rejected and the score fell 61 -> 47, with the output newly described
+        # as "heavily motion-blurred, low-resolution and over-processed" and the
+        # dining chairs recoloured from tan to bright orange. The original
+        # engine comparison found the same thing: aleph2 changed 5.8% of the
+        # image and left the grade inconsistent where gemini fixed it.
+        #
+        # So the button would hand a user a worse video than they uploaded. A
+        # blocked fix they can retry later beats a fix that damages the footage.
+        if is_wholeclip and override == "aleph2":
+            print(
+                "choose_engine: refusing aleph2 override for whole-clip work "
+                "(it degrades long regrades); using gemini_omni_flash"
+            )
+            return "gemini_omni_flash"
         return override
 
     # Whole-clip work always goes to gemini_omni_flash now: it is the only
@@ -1091,6 +1114,64 @@ def _fix_long_shot_chunked(
     return final_path, (total_cost if cost_known else None)
 
 
+def _prior_fixed_clip(db, job_id: str, shot_id: str, this_error_id: str):
+    """
+    The most recent successfully-fixed clip for this shot, if any.
+
+    Returns (url, lead_in_seconds, span_seconds) or (None, 0.0, 0.0).
+
+    Exists so that a second fix on the same shot builds on the first instead
+    of replacing it. restitch keys its output map by shot id, so without
+    chaining the second render silently discards the first — see the note at
+    the call site.
+    """
+    try:
+        snap = (
+            db.collection("jobs").document(job_id).collection("errors")
+            .where("fixStatus", "==", "fixed")
+            .get()
+        )
+    except Exception as exc:
+        print(f"_prior_fixed_clip: lookup failed ({exc}); starting from original")
+        return None, 0.0, 0.0
+
+    candidates = []
+    for doc in snap:
+        if doc.id == this_error_id:
+            continue
+        err = doc.to_dict() or {}
+        if not err.get("fixedClipUrl"):
+            continue
+        target = (
+            err.get("shotBId")
+            if err.get("fixDirection", "aTob") == "aTob"
+            else err.get("shotAId")
+        )
+        if target == shot_id:
+            candidates.append(err)
+
+    if not candidates:
+        return None, 0.0, 0.0
+
+    # Chain onto the MOST RECENT fix, so a third fix builds on the second
+    # rather than reverting to the first. Anything without a fixedAt sorts
+    # first and therefore loses, which is the safe direction: worst case we
+    # chain onto an older clip and lose one change, rather than crashing.
+    def _when(err: dict):
+        return err.get("fixedAt") or 0
+
+    candidates.sort(key=_when)
+    err = candidates[-1]
+
+    def _num(key: str) -> float:
+        try:
+            return max(0.0, float(err.get(key) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    return err["fixedClipUrl"], _num("clipLeadInSeconds"), _num("clipSpanSeconds")
+
+
 def fix_single_error(job_id: str, error_id: str) -> None:
     """Fix one confirmed error using Runway aleph2. Updates error.fixStatus in Firestore."""
     db = get_db()
@@ -1118,9 +1199,37 @@ def fix_single_error(job_id: str, error_id: str) -> None:
         bucket = get_bucket()
 
         with tempfile.TemporaryDirectory() as tmp:
-            # Download original video
+            # Source for this fix: a clip already fixed on THIS shot if one
+            # exists, otherwise the original video.
+            #
+            # Every fix used to start from job["inputVideoUrl"] unconditionally.
+            # With two confirmed errors on one shot that produced two
+            # independent re-renders of the same original footage, each
+            # carrying its own change and neither carrying the other's — and
+            # restitch then keeps only ONE of them, because it builds
+            # `fixed_clips[target_shot] = ...` in a loop over errors and the
+            # last write wins. So the user paid for both renders, both could
+            # be reported verified against their own output, and the delivered
+            # video contained whichever happened to be written last.
+            #
+            # Chaining instead: each fix on a shot starts from the previous
+            # fix's output, so changes accumulate and the final clip really is
+            # the one that carries them all. It also keeps each Runway
+            # instruction single-purpose, which is what the repairability rule
+            # asks for — a compound "regrade AND change the wardrobe" ask is
+            # the shape that fails.
+            prior_clip_url, prior_lead_in, prior_span = _prior_fixed_clip(
+                db, job_id, fix_shot_id, error_id
+            )
+            source_url = prior_clip_url or job["inputVideoUrl"]
+            if prior_clip_url:
+                print(
+                    f"fix {error_id}: chaining onto an existing fixed clip for "
+                    f"shot {fix_shot_id}"
+                )
+
             video_local = os.path.join(tmp, "video.mp4")
-            r = requests.get(job["inputVideoUrl"], timeout=180, stream=True)
+            r = requests.get(source_url, timeout=180, stream=True)
             r.raise_for_status()
             with open(video_local, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -1176,33 +1285,58 @@ def fix_single_error(job_id: str, error_id: str) -> None:
             # Runway will accept it, so the fixed clip is longer than the shot
             # and does not start where the shot starts. Splicing it in whole
             # would drift every segment after it.
-            clip_start_s, clip_span_s = _clip_window(
-                video_local, fix_shot["startMs"], fix_shot["endMs"]
-            )
-            clip_lead_in_s = max(0.0, fix_shot["startMs"] / 1000.0 - clip_start_s)
-
-            if in_video_marker:
-                extract_clip_with_in_video_marker(
-                    video_local,
-                    fix_shot["startMs"],
-                    fix_shot["endMs"],
-                    target_bboxes,
-                    clip_local,
-                )
-                print(
-                    f"Extracted clip with {len(target_bboxes)} in-video marker(s)"
-                )
+            if prior_clip_url:
+                # The source IS the shot already — a previous fix's output,
+                # cut to this shot and sized for Runway on that run. Cutting
+                # it again with the ORIGINAL video's timestamps would slice at
+                # the wrong place entirely, since those are offsets into the
+                # full film and this file starts at the shot. So reuse the
+                # geometry the earlier fix recorded and take the clip whole.
+                clip_span_s = prior_span or shot_dur
+                clip_lead_in_s = prior_lead_in
+                if in_video_marker:
+                    # Markers must still be burned in, but over the whole of
+                    # this file rather than a window inside it.
+                    prior_dur_ms = int(
+                        (_probe_duration(video_local) or clip_span_s) * 1000
+                    )
+                    extract_clip_with_in_video_marker(
+                        video_local, 0, prior_dur_ms, target_bboxes, clip_local
+                    )
+                    print(
+                        f"Chained clip re-marked with {len(target_bboxes)} "
+                        f"in-video marker(s)"
+                    )
+                else:
+                    shutil.copyfile(video_local, clip_local)
             else:
-                extract_clip(
-                    video_local,
-                    fix_shot["startMs"],
-                    fix_shot["endMs"],
-                    clip_local,
-                    # No bbox on this path, so nothing depends on the padded
-                    # frame — and the black bars would be outpainted.
-                    pad_to_frame=not is_wholeclip_type,
-                    min_dimension=FIX_ENGINES[engine]["min_dimension"],
+                clip_start_s, clip_span_s = _clip_window(
+                    video_local, fix_shot["startMs"], fix_shot["endMs"]
                 )
+                clip_lead_in_s = max(0.0, fix_shot["startMs"] / 1000.0 - clip_start_s)
+
+                if in_video_marker:
+                    extract_clip_with_in_video_marker(
+                        video_local,
+                        fix_shot["startMs"],
+                        fix_shot["endMs"],
+                        target_bboxes,
+                        clip_local,
+                    )
+                    print(
+                        f"Extracted clip with {len(target_bboxes)} in-video marker(s)"
+                    )
+                else:
+                    extract_clip(
+                        video_local,
+                        fix_shot["startMs"],
+                        fix_shot["endMs"],
+                        clip_local,
+                        # No bbox on this path, so nothing depends on the padded
+                        # frame — and the black bars would be outpainted.
+                        pad_to_frame=not is_wholeclip_type,
+                        min_dimension=FIX_ENGINES[engine]["min_dimension"],
+                    )
 
             # Upload input clip to Firebase so Runway can fetch it via public URL
             clip_storage = f"jobs/{job_id}/clips/{error_id}_input.mp4"
@@ -1349,7 +1483,11 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                     bucket=bucket,
                     tmp=tmp,
                 )
-                import shutil
+                # shutil is imported at module level. A second `import shutil`
+                # HERE made the name local to the whole of fix_single_error,
+                # so the shutil.copyfile in the chaining path above — hundreds
+                # of lines earlier — raised UnboundLocalError before Runway was
+                # ever called.
                 shutil.copy2(chunked_path, fixed_local)
             else:
                 # Short shot (≤5s): single Runway call
@@ -1376,6 +1514,11 @@ def fix_single_error(job_id: str, error_id: str) -> None:
 
         update_data = {
             "fixStatus": "fixed",
+            # When this fix landed. Read by _prior_fixed_clip to chain a later
+            # fix on the same shot onto the most recent output rather than an
+            # arbitrary earlier one; createdAt is detection time and says
+            # nothing about fix order.
+            "fixedAt": datetime.now(timezone.utc),
             "fixedClipUrl": fixed_firebase_url,
             "originalClipUrl": clip_public_url,
             "clipLeadInSeconds": round(clip_lead_in_s, 3),

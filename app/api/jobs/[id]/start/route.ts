@@ -4,8 +4,10 @@ import { adminDb, adminAuth } from "@/lib/firebase-admin";
 import { triggerProcessJob } from "@/lib/modal";
 import { captureServer } from "@/lib/posthog-server";
 import { ensureEntitlement } from "@/lib/entitlements";
-
-const FREE_SCANS_PER_DAY = 3;
+// Single source of truth — the pricing page states this same number, and the
+// two drifting apart means the site promises one thing and the API enforces
+// another.
+import { FREE_SCANS_PER_DAY } from "@/lib/types";
 
 export async function POST(
   req: NextRequest,
@@ -65,8 +67,16 @@ export async function POST(
         const scanDate = userData.scanDate ?? "";
         const scansToday = scanDate === today ? (userData.scansToday ?? 0) : 0;
         if (scansToday >= FREE_SCANS_PER_DAY) {
+          // No longer says "upgrade": there are no plans to upgrade to. The
+          // daily limit exists because analysis is the part that costs real
+          // money per run (Claude vision, billed to us on every scan, free
+          // ones included) — unlike fixes, which draw on a prepaid balance.
           return NextResponse.json(
-            { error: "Free plan allows 3 scans per day. Try again tomorrow or upgrade.", code: "scan_limit" },
+            {
+              error:
+                `That's your ${FREE_SCANS_PER_DAY} free scans for today — they reset at midnight UTC.`,
+              code: "scan_limit",
+            },
             { status: 429 }
           );
         }

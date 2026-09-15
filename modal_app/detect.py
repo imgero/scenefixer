@@ -16,7 +16,7 @@ from modal_app.firebase import get_db
 from modal_app.prompts import build_detection_prompt, build_standalone_prompt, build_holistic_prompt
 
 
-PROMPT_VERSION = "v16"  # bumped: no double-flagging atmosphere+lighting for the same root cause
+PROMPT_VERSION = "v17"  # bumped: different_scene no longer discards object-level findings
 HOLISTIC_VERSION = "v1"  # separate version for holistic scene analysis
 WINDOW_SECONDS = 60  # sliding window for same-scene detection
 SMALL_VIDEO_THRESHOLD = 10  # ≤ this many shots → compare every pair
@@ -68,6 +68,154 @@ def is_far_grade_error(idx_a: int, idx_b: int, err_type: str) -> bool:
 # would otherwise grow quadratically without bound; adjacent pairs are kept
 # first because they carry most of the continuity signal.
 MAX_PAIRS = 60
+
+# Hard ceiling on standalone (per-shot) comparisons for one job.
+#
+# MAX_PAIRS bounded the pair term but left this one growing linearly with shot
+# count, so a long video's analysis cost kept climbing after the dominant term
+# had stopped. Each standalone call is 5 images plus a prompt — roughly $0.043
+# at Opus 4.8's $5/$25 per Mtok — and analysis is billed to us on every scan,
+# including free ones. 40 keeps a long video's standalone term near $1.70.
+#
+# Over the cap, shots are SAMPLED EVENLY across the video rather than truncated
+# to the first 40: standalone errors (a boom mic, an anachronistic prop) are
+# spread through the footage, and taking a prefix would leave the back half of
+# a long video unexamined while reporting a clean result for it.
+MAX_STANDALONE = 40
+
+
+# Defect classes for the final collapse (see collapse_by_defect_class).
+#
+# Two findings on the same shot in the same class are ONE edit, not two. The
+# grade class merges lighting, atmosphere and "other" (style/render mismatch)
+# because they are the same remedy — a regrade of the shot — and because the
+# detection prompt already forbids reporting a lighting error and an
+# atmosphere error for one root cause. It could not enforce that itself: the
+# rule lives in the prompt, but each pair is a separate API call with no
+# knowledge of what the others found, so shot 7 came back with BOTH
+# "lighting changes from night to sunrise" and "background shifts from stormy
+# night to golden sunrise" — one defect, described twice, counted twice.
+#
+# Matches GRADE_TYPES above, which groups the same three for the adjacency rule.
+DEFECT_CLASS = {
+    "lighting": "grade",
+    "atmosphere": "grade",
+    "other": "grade",
+    "wardrobe": "wardrobe",
+    "hair": "hair",
+    "prop": "objects",
+    "set_dressing": "objects",
+    "eyeline": "eyeline",
+}
+
+# How many merged fix instructions to carry into one prompt. Past three the
+# instruction stops reading as a brief and starts reading as a list, and the
+# fix models measurably do worse with compound asks — the same reason the
+# detection prompt is told to SPLIT a mixed error rather than write one
+# fix_suggestion covering both halves.
+MAX_MERGED_SUGGESTIONS = 3
+
+
+def _severity_rank(err: dict) -> int:
+    return {"high": 3, "medium": 2, "low": 1}.get(
+        str(err.get("severity") or "medium").lower(), 2
+    )
+
+
+def collapse_by_defect_class(
+    deduped: list, target_shot_id
+) -> list:
+    """
+    Collapse findings that target the same shot and the same defect class.
+
+    Text-similarity dedupe runs before this and catches the same object
+    described twice. It cannot catch a SYSTEMIC defect, because each pair
+    reports it against a different reference and so describes a different
+    object every time. On a 14-shot AI animation whose characters change
+    clothes throughout, that produced twelve separate wardrobe errors — one
+    per pair that happened to show it — including three on shot 13 alone,
+    each comparing the same dress against a different earlier shot.
+
+    The user cannot act on that list, the score reads it as twelve problems
+    when there is one, and every entry would be charged and rendered
+    separately: 193 credits against a 90-credit grant, and six stacked Runway
+    re-renders of the same 5.9 seconds of footage, each degrading what the
+    next one receives.
+
+    The surviving finding is the most severe in its group. The others are not
+    discarded — their instructions are merged into its fix_suggestion and
+    their descriptions kept on `merged_descriptions`, so the user still sees
+    everything that was found and the fix still addresses all of it.
+    """
+    groups: dict = {}
+    order: list = []
+    for sa, sb, err in deduped:
+        cls = DEFECT_CLASS.get(str(err.get("type") or "other").lower(), "other")
+        # Repairability is part of the key, so a repairable finding is never
+        # merged into an unrepairable one. Grouping them together made the
+        # whole group unrepairable — on the first live run that silently cost
+        # two genuinely fixable findings, because "change the background to
+        # match" got absorbed into "the characters morph, this needs a
+        # re-shoot". It is also precisely the compound ask the repairability
+        # rule exists to prevent: PARTLY unrepairable errors must be split,
+        # never combined into one instruction asking for both.
+        repairable = err.get("repairable") is not False
+        key = (target_shot_id(sa, sb, err), cls, repairable)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((sa, sb, err))
+
+    collapsed: list = []
+    for key in order:
+        members = groups[key]
+        if len(members) == 1:
+            collapsed.append(members[0])
+            continue
+
+        # Most severe wins the slot; ties keep detection order, which is
+        # deterministic (results are sorted by task index before dedupe).
+        members.sort(key=lambda m: -_severity_rank(m[2]))
+        sa, sb, primary = members[0]
+        primary = dict(primary)
+
+        extra_fixes, extra_descs = [], []
+        for _, _, other in members[1:]:
+            fix = (other.get("fix_suggestion") or "").strip()
+            desc = (other.get("description") or "").strip()
+            if fix and fix != (primary.get("fix_suggestion") or "").strip():
+                extra_fixes.append(fix)
+            if desc:
+                extra_descs.append(desc)
+
+        if extra_fixes:
+            kept = extra_fixes[: MAX_MERGED_SUGGESTIONS - 1]
+            primary["fix_suggestion"] = " ".join(
+                [(primary.get("fix_suggestion") or "").strip()] + kept
+            ).strip()
+
+        primary["merged_count"] = len(members)
+        primary["merged_descriptions"] = extra_descs
+
+        collapsed.append((sa, sb, primary))
+
+    if len(collapsed) < len(deduped):
+        print(
+            f"collapse_by_defect_class: {len(deduped)} → {len(collapsed)} "
+            f"after merging same-shot same-class findings"
+        )
+    return collapsed
+
+
+def sample_shots_for_standalone(shots: list[dict]) -> list[dict]:
+    """Evenly-spaced subset of `shots`, at most MAX_STANDALONE of them."""
+    n = len(shots)
+    if n <= MAX_STANDALONE:
+        return shots
+    step = n / MAX_STANDALONE
+    picked = [shots[min(n - 1, int(i * step))] for i in range(MAX_STANDALONE)]
+    print(f"sample_shots_for_standalone: {n} shots sampled to {len(picked)}")
+    return picked
 
 _RETRY_DELAYS = (5, 15, 45)  # seconds between attempts on 529
 
@@ -130,6 +278,45 @@ def cache_key(urls_a: list[str], urls_b: list[str], user_hint: str = "") -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:40]
 
 
+# Frames sent per shot in a PAIR comparison.
+#
+# Standalone detection keeps all five, because that is the pass that finds
+# drift INSIDE a shot — the teddy bear growing a crown at frame 2, the window
+# turning from rain to sunset between frames 3 and 5. Measured against both
+# test videos: 4 of the 5 findings citing a specific frame number came from
+# standalone, only 1 from a pair.
+#
+# Pair comparison is mostly "shot A is warm, shot B is cool", which does not
+# need five frames a side. Images are 86% of the tokens in a pair call, so
+# 10 images down to 6 takes roughly 38% off the dominant cost of an analysis.
+# Both compare_pair's own docstring and DETECTION_PROMPT say "up to 3 frames
+# per shot", and the code had drifted to 5 — so 3 looked like a restoration.
+#
+# IT IS NOT. Measured 15 Sep, same pair, four runs each:
+#   shots 7->8   5 frames: found 3 errors on 3 of 4 runs
+#                3 frames: different_scene on 4 of 4 — found NOTHING
+#   shots 0->1   5 frames: found 1 error on 3 of 4 runs
+#                3 frames: found nothing on 4 of 4
+#
+# Fewer frames means less evidence that two shots belong to the same scene, so
+# the model falls back on "this must be a deliberate cut" and returns
+# different_scene — silently reporting a broken video as clean. The saving was
+# 38% of the dominant cost and it is not worth buying with detections.
+#
+# The prompt text is what is out of date here, not the code. Left at 5.
+PAIR_FRAMES = 5
+
+
+def _sample_frames(urls, n: int = PAIR_FRAMES):
+    """Evenly-spaced subset keeping the first and last, which bound the shot."""
+    if len(urls) <= n:
+        return urls
+    if n == 1:
+        return [urls[len(urls) // 2]]
+    step = (len(urls) - 1) / (n - 1)
+    return [urls[round(i * step)] for i in range(n)]
+
+
 def _frame_urls(shot: dict) -> list[str]:
     """Return all keyframe URLs for a shot; fall back to single keyframeUrl."""
     urls = shot.get("keyframeUrls")
@@ -179,8 +366,11 @@ def compare_pair(
     Returns list of error dicts (may be empty). Checks /cache collection first.
     """
     db = get_db()
-    urls_a = _frame_urls(shot_a)
-    urls_b = _frame_urls(shot_b)
+    # Subsample BEFORE the cache key is built, so the key describes what was
+    # actually sent. A key built from five URLs would happily return a result
+    # produced from five frames to a call that only showed three.
+    urls_a = _sample_frames(_frame_urls(shot_a))
+    urls_b = _sample_frames(_frame_urls(shot_b))
     if not urls_a or not urls_b:
         return []
 
@@ -197,6 +387,25 @@ def compare_pair(
     for i, url in enumerate(urls_a, start=1):
         content.append({"type": "text", "text": f"SHOT A · frame {i}/{len(urls_a)}"})
         content.append({"type": "image", "source": {"type": "url", "url": url}})
+
+    # Cache the shot-A prefix.
+    #
+    # Shot A's frames are re-sent on every pair it appears in — on a 14-shot
+    # video each image went over the wire about 8.6 times (60 pairs x 10
+    # images against 70 unique images). Marking the last shot-A block makes
+    # everything up to here a cacheable prefix, so the second and later pairs
+    # sharing this shot A read it back at a tenth of the price. Measured at
+    # ~45% off those calls.
+    #
+    # The breakpoint sits AFTER shot A and BEFORE shot B deliberately: the
+    # prompt stays exactly where it has always been, last in the user turn.
+    # Moving it into `system` would cache more, but it would also change what
+    # the model is shown — and a same-model, same-input control run differed
+    # on 2 of 6 pairs today, so this codebase cannot currently detect a small
+    # quality regression. Take the cheap half that is provably inert.
+    if content:
+        content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+
     for i, url in enumerate(urls_b, start=1):
         content.append({"type": "text", "text": f"SHOT B · frame {i}/{len(urls_b)}"})
         content.append({"type": "image", "source": {"type": "url", "url": url}})
@@ -217,11 +426,38 @@ def compare_pair(
 
     parsed = json.loads(raw)
 
-    if parsed.get("different_scene"):
-        cache_ref.set({"errors": [], "ts": datetime.now(timezone.utc)})
-        return []
-
     errors = parsed.get("errors", [])
+
+    if parsed.get("different_scene"):
+        # different_scene used to discard EVERYTHING and return []. That made it
+        # an all-or-nothing escape hatch: one uncertain judgement call about
+        # whether a cut was deliberate silently threw away every finding in the
+        # pair, and reported broken footage as clean.
+        #
+        # Measured 15 Sep on one real video: shots 7->8 returned different_scene
+        # on 4 of 4 runs at 3 frames and on 1 of 4 at 5 frames, while the runs
+        # that did NOT bail found 3 genuine errors. The flag flips on roughly
+        # 1 in 4 runs for pairs where two shots simply look unalike — which is
+        # exactly the most-broken footage, the users who most need the findings.
+        #
+        # It now means only "these two shots were never meant to match in LOOK",
+        # so it drops grade-type findings and keeps object-level ones. A jacket
+        # that changes colour is a continuity error whether or not the scene
+        # changed around it. This is the same distinction GRADE_TYPES already
+        # draws for non-adjacent pairs; different_scene was a second, blunter
+        # copy of it.
+        kept = [
+            e for e in errors
+            if str(e.get("type") or "").lower() not in GRADE_TYPES
+        ]
+        if len(kept) != len(errors):
+            print(
+                f"different_scene: dropped {len(errors) - len(kept)} grade "
+                f"finding(s), kept {len(kept)} object finding(s)"
+            )
+        cache_ref.set({"errors": kept, "ts": datetime.now(timezone.utc)})
+        return kept
+
     cache_ref.set({"errors": errors, "ts": datetime.now(timezone.utc)})
     return errors
 
@@ -357,6 +593,12 @@ def write_errors(job_id: str, shot_a: dict, shot_b: dict, errors: list[dict]) ->
             **_repairability(err),
             "createdAt": datetime.now(timezone.utc),
         }
+        # Present only when collapse_by_defect_class merged findings into this
+        # one. The UI shows the extra descriptions so nothing detected is
+        # hidden from the user just because it is repaired by the same edit.
+        if err.get("merged_count", 1) > 1:
+            doc["mergedCount"] = err["merged_count"]
+            doc["mergedDescriptions"] = err.get("merged_descriptions", [])
         if bbox:
             doc[bbox_field] = {
                 "x": bbox["x"], "y": bbox["y"], "w": bbox["w"], "h": bbox["h"]
@@ -496,6 +738,25 @@ def run_detect(job_id: str) -> int:
             },
             job=job_doc,
         )
+
+        # A job that reaches awaiting_confirmation with zero shots shows the
+        # user an empty result page. That is a failure even though nothing
+        # threw, and it is exactly the branch that used to mask a decompose
+        # rejection — so it is worth an email, not just an event.
+        try:
+            from modal_app import notify
+            notify.analysis_failed(
+                job_id,
+                job=job_doc,
+                reason="no shots — nothing could be analysed",
+                detail=(
+                    "Decompose produced no shots for this video, so the user "
+                    "is looking at an empty result. Check the upload itself "
+                    "and the keyframe extraction for this job."
+                ),
+            )
+        except Exception as exc:
+            print(f"analysis_failed notify failed: {exc}")
         return 0
 
     # 1. Collect all errors — both standalone (per-shot) and pair-wise (cross-shot).
@@ -508,10 +769,13 @@ def run_detect(job_id: str) -> int:
     from concurrent.futures import ThreadPoolExecutor
 
     pair_list = get_pairs_to_compare(shots) if len(shots) >= 2 else []
-    tasks: list[tuple[dict, dict]] = [(shot, shot) for shot in shots] + pair_list
+    standalone_shots = sample_shots_for_standalone(shots)
+    tasks: list[tuple[dict, dict]] = [
+        (shot, shot) for shot in standalone_shots
+    ] + pair_list
     print(
-        f"Detection: {len(shots)} standalone + {len(pair_list)} pair comparisons "
-        f"across {DETECT_CONCURRENCY} workers"
+        f"Detection: {len(standalone_shots)} standalone + {len(pair_list)} pair "
+        f"comparisons across {DETECT_CONCURRENCY} workers"
     )
 
     def _run(idx_task):
@@ -621,6 +885,11 @@ def run_detect(job_id: str) -> int:
         if not is_dup:
             deduped.append((sa, sb, err))
 
+    # 2b. Collapse systemic defects. Text similarity above catches the same
+    # object described twice; this catches one defect reported once per pair
+    # that happened to show it. See collapse_by_defect_class.
+    deduped = collapse_by_defect_class(deduped, _target_shot_id)
+
     # 3. Write deduped errors.
     #
     # Each write runs Grounding DINO over the target shot's 5 keyframes to
@@ -654,7 +923,9 @@ def run_detect(job_id: str) -> int:
         db.collection("jobs").document(job_id).collection("errors").get()
     )
     all_errors = [e.to_dict() for e in all_errors_snap]
-    score = compute_continuity_score(all_errors)
+    # Pass the shot count: the score is error DENSITY, and without it a
+    # fifteen-shot video is scored as if it were a two-shot one.
+    score = compute_continuity_score(all_errors, len(shots))
 
     job_ref.update({
         "status": "awaiting_confirmation",
@@ -681,5 +952,23 @@ def run_detect(job_id: str) -> int:
         },
         job=job_doc,
     )
+
+    try:
+        from modal_app import notify
+        # Re-read: decompose writes the truncation fields, and job_doc was
+        # loaded at the top of this function, before any of that happened.
+        fresh = job_ref.get().to_dict() or {}
+        notify.analysis_finished(
+            job_id,
+            job=fresh,
+            shot_count=len(shots),
+            error_count=total_errors,
+            score=score,
+            truncated=bool(fresh.get("analysisTruncated")),
+            analysed_s=fresh.get("analysedSeconds"),
+            total_s=fresh.get("totalSeconds"),
+        )
+    except Exception as exc:
+        print(f"analysis_finished notify failed: {exc}")
 
     return total_errors

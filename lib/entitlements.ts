@@ -29,10 +29,18 @@ export function startOfMonth(date: Date = new Date()): number {
  * would reach in a month, so it never fires in normal use.
  */
 export const MONTHLY_SPEND_CEILING: Record<Plan, number> = {
-  free: 30,
-  starter: 120,
-  pro: 300,
-  studio: 800,
+  // Must stay ABOVE PLAN_LIMITS[plan].creditsPerMonth, or the ceiling silently
+  // becomes the grant: when the free grant went to 90 this was still 30, which
+  // would have capped every free user at a third of what they were promised
+  // and produced a "you have 60 credits" balance that could not be spent.
+  //
+  // Purchased credits stack on top of the grant, so the headroom above it is
+  // what a credit pack can actually buy within one month — 300 lets a free
+  // user spend their 90 plus a $100/240-credit pack without hitting this.
+  free: 300,
+  starter: 400,
+  pro: 800,
+  studio: 1600,
 };
 
 /**
