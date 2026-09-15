@@ -326,7 +326,56 @@ def _frame_urls(shot: dict) -> list[str]:
     return [single] if isinstance(single, str) else []
 
 
-def _repairability(err: dict) -> dict:
+# Words that mark a complaint as "this shot does not hold together across its
+# own frames" rather than "these two shots do not match each other".
+_WITHIN_SHOT_PHRASES = (
+    "across frames",
+    "across all frames",
+    "between frames",
+    "frame 1",
+    "from frame",
+    "shifts dramatically",
+    "changes throughout",
+    "different location",
+    "distinct urban",
+)
+
+
+def _is_within_shot_environment_drift(err: dict, shot_a: dict, shot_b: dict) -> bool:
+    """
+    True when an error says one shot's own environment changes mid-shot.
+
+    This is never repairable, and offering it as a fix is actively harmful.
+    Observed end to end on job oxm8ye6yq1whnx1ryrvwz6j7: shot detection at
+    threshold 27.0 merged four scenes — running boots, soldiers boarding a
+    truck, a wide exterior, a truck interior — into one "shot". Comparing that
+    shot against itself produced a true observation, "the background shifts
+    dramatically across frames", which was marked repairable and sold as a fix.
+
+    The instruction that produces — "match the background environment across all
+    frames to a single consistent location" — asks a video model to REPLACE two
+    of the four scenes. Gemini complied: it erased the boarding close-up and
+    fabricated ~0.8s of wide-shot footage over it. The invented motion does not
+    meet the real footage, so the running soldier jumps backward at the handover
+    and the delivered video reads as broken in a way the upload was not.
+
+    Either cause — a cut we failed to detect, or genuine generative morphing
+    inside a real shot — needs different footage, not an edit. So this is a
+    structural refusal, independent of what the detection model claimed and
+    independent of the detection threshold, which is why it stays even once
+    that threshold is corrected.
+    """
+    if shot_a.get("id") != shot_b.get("id"):
+        return False
+    if (err.get("type") or "") not in ("atmosphere", "lighting", "background", "other"):
+        return False
+    text = " ".join(
+        str(err.get(k, "")) for k in ("description", "fix_suggestion")
+    ).lower()
+    return any(p in text for p in _WITHIN_SHOT_PHRASES)
+
+
+def _repairability(err: dict, shot_a: dict = None, shot_b: dict = None) -> dict:
     """
     Whether a text-instructed edit of existing footage can plausibly fix this.
 
@@ -339,6 +388,15 @@ def _repairability(err: dict) -> dict:
     Absent field means repairable, so errors detected before this existed keep
     behaving as they did.
     """
+    if shot_a is not None and shot_b is not None:
+        if _is_within_shot_environment_drift(err, shot_a, shot_b):
+            return {
+                "repairable": False,
+                "notRepairableReason": (
+                    "this shot cuts between different scenes partway through, so "
+                    "it needs re-editing rather than a look change"
+                ),
+            }
     repairable = err.get("repairable")
     if repairable is None:
         return {"repairable": True}
@@ -590,7 +648,7 @@ def write_errors(job_id: str, shot_a: dict, shot_b: dict, errors: list[dict]) ->
             "userConfirmed": False,
             "fixStatus": "pending",
             "verifiedResolved": False,
-            **_repairability(err),
+            **_repairability(err, shot_a, shot_b),
             "createdAt": datetime.now(timezone.utc),
         }
         # Present only when collapse_by_defect_class merged findings into this

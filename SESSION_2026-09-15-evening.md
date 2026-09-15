@@ -1,0 +1,260 @@
+# Session 2026-09-15 evening — the first real user on the new build, and four defects between a good fix and a good download
+
+Started from a PostHog export taken while a user was still on the site. One real
+user, `bsilent590@gmail.com`, arrived from ChatGPT at 18:46 UTC, signed up 40
+seconds later, uploaded 8.9s of AI-generated war footage, confirmed two errors
+and requested two fixes. Both failed. He left at 18:53:49.
+
+Reviewing what he was actually handed found four separate defects in the
+delivery path, none of which had anything to do with detection or with the fix
+engine. Everything here was measured against his real assets and two other
+jobs' real assets, by re-running the shipped `restitch()` offline.
+
+**Nothing in this session is deployed.** Changes are uncommitted in
+`modal_app/stitch.py` and `modal_app/detect.py`.
+
+---
+
+## 1. What happened to him
+
+| Time (UTC) | |
+|---|---|
+| 18:46:21 | Lands on `/?utm_source=chatgpt.com` |
+| 18:46:22 | Clicks sign in — one second later |
+| 18:47:20 | Upload completes (5s) |
+| 18:49:26 | **Analysis completes — 2m 03s**, 5 shots, 3 errors, score 78 |
+| 18:49:57 / 18:50:14 | Confirms two errors, requests both fixes |
+| 18:52:06 | Fix A returns and **fails verification** |
+| 18:53:07 | Fix B **blocked by Runway content moderation** |
+| 18:53:49 | Last click. Gone. |
+
+Analysis at 2 minutes is the best real-user number so far. Credits worked
+correctly for the first time on a live user: 2 + 3 deducted, 5 refunded, balance
+correct against the 90/month free grant. **That closes the open item from the
+morning session.**
+
+Fix B's failure is vendor-side and legitimate — `Input media did not pass
+content moderation` on footage containing a fireball, a soldier thrown to the
+ground and a prone body. Not a false positive. The Claude diagnosis path
+identified the cause at high confidence and wrote a good user-facing message;
+that code earned its place on its first live run.
+
+---
+
+## 2. Four defects in the delivery path
+
+All four were invisible to every existing check, and all four were found by
+measuring the delivered file rather than by reading code.
+
+### 2.1 Portrait video delivered as landscape — `stitch.py`
+
+`TARGET_W, TARGET_H = 1280, 720` was hardcoded, justified by a comment saying
+"Runway outputs 1280x720". That was never a reason to reshape the *user's*
+video, and it is no longer true: `gemini_omni_flash` returns portrait for
+portrait input. His 720×1280 upload was pillarboxed into landscape, then
+downscaled by `post_process`, leaving roughly **270×480 of picture inside a
+letterboxed file — 86% of the frame discarded, in the wrong orientation**, on
+the format most of our uploads arrive in.
+
+The source's own geometry is now the target. This also fixed a silent downscale
+on a landscape job: 1366×768 had been resized to 1280×720 for no reason.
+
+### 2.2 The trim guard that could never fire — `stitch.py`
+
+The guard meant to cut over-long returned clips read `clipSpanSeconds` — the
+span we *requested* — and compared it against the shot span. On an ordinary fix
+those two are equal by construction, so the condition was **always false**. It
+could only ever fire when we had padded the request ourselves, and it never
+looked at the returned file at all.
+
+Models do not honour the requested length. Gemini returned **60 frames for a
+58-frame shot**. It now probes the returned file and trims on the measured
+duration.
+
+### 2.3 Accumulating A/V drift — `stitch.py`
+
+Fixing 2.2 made sync *worse*: −50ms became −90ms. The frame overrun had been
+masking a larger problem.
+
+Every segment carried its own independently-encoded AAC track, which the concat
+demuxer joined end to end. AAC prepends priming samples to each track, so
+**every segment boundary inserted a gap and the error accumulated down the
+timeline** — while the first segment still measured in sync, which is exactly
+why it was never caught.
+
+Fixes are visual-only and the assembled picture now occupies exactly the
+source's timeline, so the source's own audio lines up by construction. It is
+copied over the finished video in one piece, bit-identical to the upload.
+
+Measured on a **real user's job** (`fmxdjudb57p3zlf4xsdvgjt2`, a verified 24.2s
+chunked lighting fix): **+90ms at 0.9338 correlation → 0ms at 1.0000.** That
+user was shipped 90ms of drift on a fix that otherwise worked.
+
+### 2.4 Shipping fixes we had already refunded — `stitch.py`
+
+The stitcher selected clips on `fixStatus == "fixed"` alone, which only records
+that Runway returned a file. **The verifier's judgement and the refund decision
+were both ignored.** On this job the fix was `verifiedResolved: false`, "the
+error is still visible", `autoRefunded: true` — and the clip went into his
+download anyway. He paid nothing and still received a video visibly worse than
+the one he uploaded.
+
+**The rule now: if we would not charge for it, we do not ship it.** The worst
+case a user can get is their own footage back, unchanged, with an honest report
+of what was found — never footage we damaged. This is the backstop for every
+upstream mistake, including ones not yet known.
+
+---
+
+## 3. The lag at 2.04s — root cause is shot detection
+
+He would have seen a distinct stutter: the running soldier advances toward the
+truck, snaps **backward** at 2.04s, then advances again.
+
+Frame-by-frame, the clip we *sent* Runway contains a close-up of soldiers
+boarding the truck, then a hard cut at its frame 22 to a wide shot — two scenes,
+one clean edit. The clip Gemini *returned* is all wide shot. It erased the
+boarding close-up and extended the wide shot backwards over it, which is exactly
+what "match the background environment across all frames to a single consistent
+location" told it to do. To comply it **fabricated ~0.8s of footage**, and the
+invented motion does not meet the real footage. The jump is that handover.
+
+Why that fix was offered at all: `ContentDetector(threshold=27.0)` in
+`decompose.py` **merged four scenes into one shot** — running boots, boarding,
+wide exterior, truck interior, all inside `shot_0001`. Comparing that shot
+against itself produced a true observation that was never a continuity defect.
+
+```
+threshold 27.0 (shipping) → 5 shots: 1.253  3.675  5.971  7.516
+threshold 22.0            → 6 shots: 1.253  2.171  3.257  5.971  7.516
+threshold 18.0 / 15.0     → 6 shots: same
+```
+
+Independently confirmed by luma measurement: the cut at **3.257 scores 103** —
+the largest frame-to-frame change anywhere in the video — and 27.0 walked past
+it while accepting one at 3.675 scoring 59.
+
+**The threshold has NOT been changed.** Across four real videos, 27→22 leaves
+two unchanged and adds shots to two. Cost tracks shot count, detection is
+non-deterministic run to run, and an A/B here needs a repeat-run control — the
+standard this project already set for itself. The evidence that 27.0 is *wrong*
+is strong; the evidence for its replacement is one video deep.
+
+### The guard that was added instead — `detect.py`
+
+When a finding says one shot's own environment changes across its own frames
+(`shotAId == shotBId` on a grade-type error), it is now marked **unrepairable**
+and shown as a finding with no fix button. Either it is a cut we failed to
+detect or it is generative morphing; both need re-editing, not a look change.
+
+This is deliberately independent of the threshold, so it keeps holding once the
+threshold is corrected. It is not hypothetical: `v2testou8rhv8vd9` shot 7 is a
+second instance of the same class — `A=shot_0007 B=shot_0007` — and it **passed
+verification**.
+
+---
+
+## 4. Seating a fix back into its neighbours — and the trap in doing it
+
+A fix is generated with no knowledge of the shots either side of it, so it can
+be internally perfect and still not belong. On his job the cut *into* the fixed
+shot went from a 1.1 luma step in the source — invisible — to 8.6.
+
+**The first version of this correction was wrong**, and only testing it against
+a job with a *working* fix caught it. On the real user's job the fix was a
+*lighting* fix: the source cut with a 21.6 luma step, the fix correctly closed
+it to 8.8, and matching the result back to the untouched plate shoved it out to
+**22.7 — handing back the exact mismatch they had paid to remove**. A blanket
+"make the fixed shot match the footage it replaced" undoes any repair whose
+purpose *is* the look.
+
+The rule that replaced it:
+
+- A **grade fix** (lighting / atmosphere / other) was told to match a
+  **reference shot**, so the reference is the target, not the plate.
+- Any other fix was not asked to change the look, so the plate is the target.
+- The correction only ever undoes a **regression**: if the fix left the shot
+  further from its target than the source already was, pull it back that far —
+  otherwise leave it alone. Two shots that belong together can differ in average
+  brightness for honest reasons, and forcing their means equal claims more than
+  the footage supports.
+- Convergence is by measurement, not arithmetic. `eq=brightness` clamps at the
+  top of the range, so on a shot with a blown-out sky a request for +5.0
+  delivered +2.0. It now iterates from the original source with a revised offset
+  until it converges or saturates.
+
+---
+
+## 5. Measured results
+
+Every number below comes from re-running the shipped `restitch()` over real
+assets, built twice — once on the pre-change code, once on the new.
+
+**`oxm8ye6yq1whnx1ryrvwz6j7`** — the real user, both fixes rejected:
+
+| | His original | What he got | After |
+|---|---|---|---|
+| Geometry | 720×1280 | **1280×720** | **720×1280** |
+| Frames | 212 | **214** | **212** |
+| Motion at 2.04s | smooth | **backward jump** | **smooth** |
+| Picture vs original | — | — | 1.4% mean (encode noise) |
+| A/V sync | — | −50ms · 0.75 | **0ms · 1.0000** |
+
+**`v2testou8rhv8vd9`** — 3 verified fixes, 14 shots, both engines, two fixes
+chained on one shot:
+
+| | Original | Old | New |
+|---|---|---|---|
+| Geometry | 1366×768 | **1280×720** | **1366×768** |
+| Seam into shot 2 | 12.39 | **23.21** | **11.42** |
+| Seam into shot 7 | 42.20 | **48.63** | **41.87** |
+
+**`fmxdjudb57p3zlf4xsdvgjt2`** — a real user, 1 verified chunked lighting fix:
+
+| | Original | Old | New |
+|---|---|---|---|
+| A/V sync | — | **+90ms · 0.9338** | **0ms · 1.0000** |
+| Seam into shot 1 | 21.61 | 8.75 | **8.75 — repair preserved** |
+
+---
+
+## 6. What is NOT fixed — read before promising anything
+
+- **The threshold is still 27.0.** It will still merge scenes on some videos.
+  The `detect.py` guard blocks the specific error class that produced this lag;
+  it does not make shot detection correct.
+- **The verifier does not check continuity.** It confirmed "no rain visible" on
+  a fix that had pushed its shot *further* from the one it was told to match. It
+  answers the question it was asked, not whether the relationship was repaired.
+- **Models can still return content artifacts inside a fix that passes
+  verification** — fabricated motion, morphing, a subject that jumps. Nothing
+  here detects that. The only protection is that a fix the verifier *rejects* is
+  no longer shipped.
+- **There is still no download event anywhere in the codebase.** We cannot tell
+  whether any user has ever retrieved their file.
+- **`post_process` reads the plan tier as a target height**, so a portrait video
+  on the free plan renders 270×480 where a landscape one gets 854×480. Reading
+  it as the *short* side would give vertical uploads the 480×854 their tier
+  implies. That changes what each tier is worth — a product decision, untouched.
+- **Output fps is normalised to 24** regardless of source. A 30fps upload comes
+  back 24fps at identical duration. Pre-existing, unchanged, not evaluated.
+- Refunds credit `creditsBalance` but never decrement `creditsUsedThisMonth`,
+  and `ceilingLeft` is computed from the latter — so refunded seconds still
+  count against the 300s hard monthly ceiling. Not binding at current volumes.
+
+---
+
+## 7. Reproducing any of this
+
+`restitch()` can be run offline against any cached job, with only Firestore and
+Storage stubbed — the shipped code path, real inputs, no network:
+
+```
+python3 case.py <job_id> <out.mp4>
+```
+
+Job assets are fetched with the firebase-admin credentials in `.env.local`.
+The measurement rig covers geometry, frame count, per-segment mean luma at every
+seam, and A/V sync by cross-correlating audio envelopes against the original.
+Both live in this session's scratchpad; worth moving into the repo if this
+becomes routine.
