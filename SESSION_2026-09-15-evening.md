@@ -1,4 +1,4 @@
-# Session 2026-09-15 evening — the first real user on the new build, and four defects between a good fix and a good download
+# Session 2026-09-15 evening — the first real user on the new build, and seven defects between a good fix and a good download
 
 Started from a PostHog export taken while a user was still on the site. One real
 user, `bsilent590@gmail.com`, arrived from ChatGPT at 18:46 UTC, signed up 40
@@ -7,11 +7,14 @@ and requested two fixes. Both failed. He left at 18:53:49.
 
 Reviewing what he was actually handed found four separate defects in the
 delivery path, none of which had anything to do with detection or with the fix
-engine. Everything here was measured against his real assets and two other
-jobs' real assets, by re-running the shipped `restitch()` offline.
+engine. Three more known defects were closed the same night rather than left on
+a list. Everything here was measured against his real assets and two other jobs'
+real assets, by re-running the shipped `restitch()` offline — and, for shot
+detection, against all 77 real-user videos we hold.
 
-**Nothing in this session is deployed.** Changes are uncommitted in
-`modal_app/stitch.py` and `modal_app/detect.py`.
+**Everything in this session is deployed.** `modal deploy` for the pipeline,
+`vercel --prod` for the web app, both verified live. Commits `68ff65b` and
+`d23a115`, pushed to `github.com/imgero/scenefixer`.
 
 ---
 
@@ -134,11 +137,55 @@ Independently confirmed by luma measurement: the cut at **3.257 scores 103** —
 the largest frame-to-frame change anywhere in the video — and 27.0 walked past
 it while accepting one at 3.675 scoring 59.
 
-**The threshold has NOT been changed.** Across four real videos, 27→22 leaves
-two unchanged and adds shots to two. Cost tracks shot count, detection is
-non-deterministic run to run, and an A/B here needs a repeat-run control — the
-standard this project already set for itself. The evidence that 27.0 is *wrong*
-is strong; the evidence for its replacement is one video deep.
+### The threshold stays at 27.0 — and that is a measured result
+
+The first instinct was to lower it, and the first reason not to was wrong: I
+said an A/B here needed a repeat-run control because "detection is
+non-deterministic". That conflated two different stages. The non-determinism is
+in **Opus error detection**; `ContentDetector` is a classical algorithm and is
+deterministic. So this needed no live experiment at all — it was measurable
+offline, immediately, and was.
+
+All **77 distinct real-user videos** we hold were pulled from Storage (16.4
+minutes of footage) and swept across thresholds 27 → 12, scored against an
+independent cut detector built from frame-to-frame difference.
+
+```
+ threshold    shots   cuts found   MISSED    extra
+      27.0      220     114 (53.5%)      99       40
+      22.0      238     127 (59.6%)      86       49
+      20.0      254     137 (64.3%)      76       57
+      15.0      267     124 (58.2%)      89       74
+      12.0      291     132 (62.0%)      81       91
+```
+
+Recall plateaus near 60% wherever the threshold goes, while false positives climb
+steadily. **But that table is not trustworthy on its own** — checking the
+independent detector against the one video reviewed frame by frame showed it
+flagging explosion flashes at 0.25s and 1.667s while missing real cuts at 5.971
+and 7.516. Automatic ground truth is not reliable on this footage, so no
+threshold should be chosen from those numbers.
+
+`AdaptiveDetector`, designed for exactly this fast-motion case, looked much more
+promising: on the war footage it finds `1.253 2.171 3.257 5.971 7.516` — both
+cuts 27.0 missed, without losing the ones it found, and with no tuned constant.
+Across the corpus it agrees with 27.0 on **60 of 77 videos** and adds 47 cuts on
+the rest.
+
+**Twelve of those 47 were sampled and looked at, frame before and frame after.
+Ten are false** — motion graphics, AI animation, a woman talking to camera:
+content that changes continuously without ever cutting. Switching would trade
+missed cuts for invented shot boundaries, and an invented boundary splits one
+continuous shot into two that are then compared against each other. That is the
+false-atmosphere-error shape from 9 Sep, bought back at 1.22x the shot count and
+therefore 1.22x the analysis cost.
+
+**So 27.0 stays, on evidence rather than on a guess in either direction.** What
+makes the missed cuts survivable is not the detector — it is the `detect.py`
+guard above and the ship-gate in §2.4, which between them mean a missed cut can
+no longer reach a user as a damaged video. Improving detection itself needs a
+hand-labelled evaluation set; that is the honest next step, and it is not a
+threshold change.
 
 ### The guard that was added instead — `detect.py`
 
@@ -218,43 +265,107 @@ chained on one shot:
 
 ---
 
-## 6. What is NOT fixed — read before promising anything
+## 6. Three more known defects, closed the same night
 
-- **The threshold is still 27.0.** It will still merge scenes on some videos.
-  The `detect.py` guard blocks the specific error class that produced this lag;
-  it does not make shot detection correct.
-- **The verifier does not check continuity.** It confirmed "no rain visible" on
-  a fix that had pushed its shot *further* from the one it was told to match. It
-  answers the question it was asked, not whether the relationship was repaired.
-- **Models can still return content artifacts inside a fix that passes
-  verification** — fabricated motion, morphing, a subject that jumps. Nothing
-  here detects that. The only protection is that a fix the verifier *rejects* is
-  no longer shipped.
-- **There is still no download event anywhere in the codebase.** We cannot tell
-  whether any user has ever retrieved their file.
-- **`post_process` reads the plan tier as a target height**, so a portrait video
-  on the free plan renders 270×480 where a landscape one gets 854×480. Reading
-  it as the *short* side would give vertical uploads the 480×854 their tier
-  implies. That changes what each tier is worth — a product decision, untouched.
+These were on a "not fixed" list and were going to stay there until a user
+tripped over one. That was the wrong call and they were done instead.
+
+### 6.1 Portrait users were getting half the plan they paid for
+
+`post_process` read the plan tier as a target **height**. On a landscape video
+the height *is* the short side, so "480p" produced 854×480 — the tier as
+promised. On a **portrait** video the height is the LONG side, so the same line
+produced **270×480**: a short side of 270 against a landscape user's 480, on the
+identical plan, at the identical price.
+
+Vertical is the format most uploads arrive in, so the tier was quietly worth
+about half to the majority of users. The number now means the short side in both
+orientations — 854×480 landscape, 480×854 portrait.
+
+### 6.2 The verifier now has to show it did not make things worse
+
+The Opus verifier answers the question it is asked and no other. On
+`v2testou8rhv8vd9` it passed an atmosphere fix with *"All frames show a sunny sky
+and green trees through the window with no rain visible anywhere"* — on a clip
+whose mean level had moved **away** from the shot it was told to match, a 12.3
+luma gap widening to 23.1. The user's complaint *was* that mismatch. We widened
+it and reported success.
+
+Grade fixes now carry a second gate: measure the target shot against its
+reference in the source, measure the fixed clip against the same reference, and
+fail the fix if the gap got worse by more than 3.0 luma.
+
+Deliberately one-sided. A fix that closes the gap partway is an improvement and
+passes. Two shots that honestly differ in average brightness are not penalised —
+only a fix that *widened* the difference is. Validated against the live data
+before shipping:
+
+| job | fix | gap before → after | verdict |
+|---|---|---|---|
+| `v2testou8rhv8vd9` | atmosphere, shot_0002 → match shot_0001 | 12.3 → **23.1** | now unverified |
+| `v2testou8rhv8vd9` | atmosphere, shot_0007 vs *itself* | — | no reference; blocked upstream by §3's guard |
+| `fmxdjudb57p3zlf4xsdvgjt2` | lighting, shot_0001 → match shot_0000 | 21.6 → **8.7** | passes, repair preserved |
+
+Combined with the ship-gate, a fix caught here is refunded *and* never reaches
+the delivered video.
+
+### 6.3 Downloads are finally instrumented
+
+There was no download event anywhere in the codebase. The single moment the
+product exists for was the only step in the funnel with nothing on it — so every
+delivery fix in this session was measured on our own machines with no way to
+know whether any user has ever actually retrieved a file.
+
+`download_started` now fires before the fetch (so a download that dies midway
+still counts as an attempt) carrying the job's verified / attempted / failed
+counts, whether verification passed, and the credits refunded.
+`download_completed` carries the byte count, `download_failed` the reason. A
+download can now be read against whether the fix actually worked.
+
+---
+
+## 7. What is NOT fixed — read before promising anything
+
+- **Shot detection is still imperfect and 27.0 is still the threshold.** §3
+  explains why no available change improves it: lowering it plateaus, swapping
+  detectors buys false boundaries. What stops a missed cut reaching a user is
+  the `detect.py` guard plus the ship-gate, not the detector. Fixing detection
+  properly needs a hand-labelled evaluation set.
+- **Models can still return content artifacts inside a fix that passes both
+  gates** — fabricated motion, morphing, a subject that jumps, as at 2.04s on
+  the burning-truck job. Neither the Opus verifier nor the new continuity check
+  looks for temporal coherence. This is the largest remaining hole.
+- **Fixes chain, and the ship-gate does not follow the chain.** Two fixes on one
+  shot stack: the second starts from the first's output. If the first is now
+  caught and dropped, the second still ships *carrying the first's change*. The
+  level match mitigates it; it is not resolved.
 - **Output fps is normalised to 24** regardless of source. A 30fps upload comes
   back 24fps at identical duration. Pre-existing, unchanged, not evaluated.
 - Refunds credit `creditsBalance` but never decrement `creditsUsedThisMonth`,
   and `ceilingLeft` is computed from the latter — so refunded seconds still
   count against the 300s hard monthly ceiling. Not binding at current volumes.
+- **Both new gates make fixes fail MORE often.** That is correct — we were
+  over-reporting success — but it means more refunds and fewer shipped fixes
+  until fix quality itself improves. Watch `download_started` against
+  `fixes_verified` to see what users are actually receiving.
 
 ---
 
-## 7. Reproducing any of this
+## 8. Reproducing any of this
 
-`restitch()` can be run offline against any cached job, with only Firestore and
-Storage stubbed — the shipped code path, real inputs, no network:
+The measurement rig is in the repo at **`scripts/delivery-audit/`** with its own
+README — it is not scratch work, it is the only thing that found any of this.
 
 ```
-python3 case.py <job_id> <out.mp4>
+python3 case.py <job_id> <out.mp4>     # rebuild a job's output with current code
+python3 measure.py <job_id>            # geometry, frames, seam steps, A/V sync
+python3 sweep.py / compare.py          # shot-detection experiments
 ```
 
-Job assets are fetched with the firebase-admin credentials in `.env.local`.
-The measurement rig covers geometry, frame count, per-segment mean luma at every
-seam, and A/V sync by cross-correlating audio envelopes against the original.
-Both live in this session's scratchpad; worth moving into the repo if this
-becomes routine.
+`restitch()` runs offline against any cached job with only Firestore and Storage
+stubbed: the shipped code path, real inputs, no network, no cost, and no need to
+wait for a user to hit the problem.
+
+**When the next user reports a bad output, fetch their job and run `measure.py`
+before theorising.** Every defect in this document was invisible to code review
+and visible in the file.
