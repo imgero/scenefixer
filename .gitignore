@@ -39,3 +39,8 @@ Terminal Saved Output.txt
 # Delivery-audit working copies of real user jobs — never commit user footage
 scripts/delivery-audit/cases/
 scripts/delivery-audit/corpus/
+
+# Detection eval: real user frames and contact sheets stay local
+scripts/detection-eval/frames/
+scripts/detection-eval/sheets/
+scripts/detection-eval/candidates.json

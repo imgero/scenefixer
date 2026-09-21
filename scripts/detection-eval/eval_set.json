@@ -1,0 +1,373 @@
+[
+ {
+  "id": "case00",
+  "job": "b47ouhwebj005zzyul4ot8ea",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "Check continuity of the anime character Kael between shots: same black hair, face, dark clothing, body proportions and purple energy effects. Check for changes in lighting, environment, wardrobe, hair, props and background. Keep the same dark fantasy anime style and cinematic atmosphere throughout the sequence.",
+  "flagged": [
+   {
+    "type": "wardrobe",
+    "severity": "low",
+    "description": "In Shot A Kael wears a leather jacket over a t-shirt while lying prone, but in Shot B his black clothing appears as a longer coat/full outfit including visible black pants as he kneels, indicating a wardrobe inconsistency.",
+    "userConfirmed": true
+   }
+  ],
+  "sheet": "sheets/case00.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "high",
+  "rationale": "Same black coat both shots; he is prone in A (coat tail in the mud, lower half out of frame) and kneeling in B. Owner confirmed: it has always been a coat.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case00_A0.jpg",
+    "frames/case00_A1.jpg"
+   ],
+   "B": [
+    "frames/case00_B0.jpg",
+    "frames/case00_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case01",
+  "job": "oxm8ye6yq1whnx1ryrvwz6j7",
+  "a": "shot_0003",
+  "b": "shot_0004",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "atmosphere",
+    "severity": "medium",
+    "description": "Shot A shows a bright sunny desert with warm hazy sky, while Shot B shows a much darker, cooler, overcast environment with a greyer landscape and scattered ground fires.",
+    "userConfirmed": true
+   }
+  ],
+  "sheet": "sheets/case01.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F3_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F3_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F4_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F4_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "high",
+  "rationale": "Same desert, same burning vehicle. B is a scope POV at a later moment (fireball has become a smoke column). Framing + time progression.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case01_A0.jpg",
+    "frames/case01_A1.jpg"
+   ],
+   "B": [
+    "frames/case01_B0.jpg",
+    "frames/case01_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case02",
+  "job": "v3smoke4vwk5097",
+  "a": "shot_0001",
+  "b": "shot_0002",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "other",
+    "severity": "medium",
+    "description": "Shot A uses realistic, detailed illustrated portraits with a grounded photo-illustration style, while Shot B shifts to a heavily stylized comic-book/graphic-novel rendering with bolder ink lines and exaggerated features.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case02.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F2_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F2_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "medium",
+  "rationale": "Same monochrome illustration style throughout; A sparse/dark, B dense/bright is compositional escalation in a title montage.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case02_A0.jpg",
+    "frames/case02_A1.jpg"
+   ],
+   "B": [
+    "frames/case02_B0.jpg",
+    "frames/case02_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case04",
+  "job": "odnit6zfn623ay6y8j1ted2i",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "atmosphere",
+    "severity": "medium",
+    "description": "Shot B frame 1 is a cool blue/purple stormy window scene while the rest of the sequence in both shots is warm candlelit interior, creating a jarring backdrop mismatch.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case04.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "high",
+  "rationale": "Same warm interior, continuous action: hands holding the bat, then placing it in the case. Close-up to wider.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case04_A0.jpg",
+    "frames/case04_A1.jpg"
+   ],
+   "B": [
+    "frames/case04_B0.jpg",
+    "frames/case04_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case05",
+  "job": "v2testou8rhv8vd9",
+  "a": "shot_0009",
+  "b": "shot_0010",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "atmosphere",
+    "severity": "high",
+    "description": "Shot A is an indoor playroom scene while Shot B is an outdoor sunny garden with a rainbow and sky, a dramatically different environment.",
+    "userConfirmed": false
+   },
+   {
+    "type": "other",
+    "severity": "high",
+    "description": "Shot A features stylized bear-costumed toddler characters in a purple-floored playroom, while Shot B features completely different diaper-wearing baby characters and a photorealistic outdoor rainbow garden, indicating incompatible visual styles and content.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case05.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F9_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F9_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F10_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F10_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "high",
+  "rationale": "Doors physically open between B0 and B1 revealing the garden. A deliberate transition to a new location.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case05_A0.jpg",
+    "frames/case05_A1.jpg"
+   ],
+   "B": [
+    "frames/case05_B0.jpg",
+    "frames/case05_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case06",
+  "job": "dnc5tbis2q1glauuhottrazl",
+  "a": "shot_0004",
+  "b": "shot_0005",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "lighting",
+    "severity": "medium",
+    "description": "Shot A has a cooler, more neutral daylight grade while Shot B is noticeably warmer with a golden cast from the vanity lights, making the cut feel inconsistent.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case06.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F4_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F4_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F5_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F5_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "high",
+  "rationale": "Same cosplayer, same dressing room, same costume and white balance. Close-up cut to wide; apparent exposure difference is shot scale.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case06_A0.jpg",
+    "frames/case06_A1.jpg"
+   ],
+   "B": [
+    "frames/case06_B0.jpg",
+    "frames/case06_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case10",
+  "job": "v2testou8rhv8vd9",
+  "a": "shot_0006",
+  "b": "shot_0007",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case10.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F6_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F6_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F7_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F7_1.jpg?alt=media"
+  ],
+  "label": null,
+  "expected_errors": 0,
+  "confidence": "high",
+  "rationale": "Crayon drawing to kids at the window. Storm clearing to sunshine inside B is intended story beat. Correctly clean in production.",
+  "kind": "real",
+  "frames": {
+   "A": [
+    "frames/case10_A0.jpg",
+    "frames/case10_A1.jpg"
+   ],
+   "B": [
+    "frames/case10_B0.jpg",
+    "frames/case10_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case08_syn",
+  "job": "oxm8ye6yq1whnx1ryrvwz6j7",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case08.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null,
+  "kind": "synthetic",
+  "expected_errors": 1,
+  "expected_type": "lighting",
+  "confidence": "high",
+  "rationale": "Shot B pushed 0.22 darker, desaturated to 0.45 and shifted strongly cool \u2014 a grade mismatch no cut would survive.",
+  "frames": {
+   "A": [
+    "frames/case08_A0.jpg",
+    "frames/case08_A1.jpg"
+   ],
+   "B": [
+    "frames/case08_syn_B0.jpg",
+    "frames/case08_syn_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case11_syn",
+  "job": "w023gby4ewopkevrm0cirpm3",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case11.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null,
+  "kind": "synthetic",
+  "expected_errors": 1,
+  "expected_type": "lighting",
+  "confidence": "high",
+  "rationale": "Shot B pushed 0.18 brighter, saturation 1.5x and strongly warm.",
+  "frames": {
+   "A": [
+    "frames/case11_A0.jpg",
+    "frames/case11_A1.jpg"
+   ],
+   "B": [
+    "frames/case11_syn_B0.jpg",
+    "frames/case11_syn_B1.jpg"
+   ]
+  }
+ },
+ {
+  "id": "case13_syn",
+  "job": "xs7iyuz3ratmzmuovs7uw8q8",
+  "a": "shot_0017",
+  "b": "shot_0018",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case13.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F17_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F17_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F18_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F18_1.jpg?alt=media"
+  ],
+  "label": null,
+  "kind": "synthetic",
+  "expected_errors": 1,
+  "expected_type": "lighting",
+  "confidence": "high",
+  "rationale": "Shot B darkened, contrast 1.6x and pushed blue.",
+  "frames": {
+   "A": [
+    "frames/case13_A0.jpg",
+    "frames/case13_A1.jpg"
+   ],
+   "B": [
+    "frames/case13_syn_B0.jpg",
+    "frames/case13_syn_B1.jpg"
+   ]
+  }
+ }
+]

@@ -1,0 +1,273 @@
+[
+ {
+  "id": "case00",
+  "job": "b47ouhwebj005zzyul4ot8ea",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "Check continuity of the anime character Kael between shots: same black hair, face, dark clothing, body proportions and purple energy effects. Check for changes in lighting, environment, wardrobe, hair, props and background. Keep the same dark fantasy anime style and cinematic atmosphere throughout the sequence.",
+  "flagged": [
+   {
+    "type": "wardrobe",
+    "severity": "low",
+    "description": "In Shot A Kael wears a leather jacket over a t-shirt while lying prone, but in Shot B his black clothing appears as a longer coat/full outfit including visible black pants as he kneels, indicating a wardrobe inconsistency.",
+    "userConfirmed": true
+   }
+  ],
+  "sheet": "sheets/case00.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fb47ouhwebj005zzyul4ot8ea%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case01",
+  "job": "oxm8ye6yq1whnx1ryrvwz6j7",
+  "a": "shot_0003",
+  "b": "shot_0004",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "atmosphere",
+    "severity": "medium",
+    "description": "Shot A shows a bright sunny desert with warm hazy sky, while Shot B shows a much darker, cooler, overcast environment with a greyer landscape and scattered ground fires.",
+    "userConfirmed": true
+   }
+  ],
+  "sheet": "sheets/case01.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F3_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F3_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F4_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F4_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case02",
+  "job": "v3smoke4vwk5097",
+  "a": "shot_0001",
+  "b": "shot_0002",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "other",
+    "severity": "medium",
+    "description": "Shot A uses realistic, detailed illustrated portraits with a grounded photo-illustration style, while Shot B shifts to a heavily stylized comic-book/graphic-novel rendering with bolder ink lines and exaggerated features.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case02.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F2_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F2_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case03",
+  "job": "v3smoke4vwk5097",
+  "a": "shot_0002",
+  "b": "shot_0003",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "other",
+    "severity": "low",
+    "description": "Shot B renders the collage of faces with cleaner, smoother, more polished linework and softer halftone shading, while Shot A has a grittier, higher-contrast comic-ink look \u2014 the two shots read as different processing styles.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case03.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F2_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F2_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F3_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv3smoke4vwk5097%2Fkeyframes%2F3_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case04",
+  "job": "odnit6zfn623ay6y8j1ted2i",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "atmosphere",
+    "severity": "medium",
+    "description": "Shot B frame 1 is a cool blue/purple stormy window scene while the rest of the sequence in both shots is warm candlelit interior, creating a jarring backdrop mismatch.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case04.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fodnit6zfn623ay6y8j1ted2i%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case05",
+  "job": "v2testou8rhv8vd9",
+  "a": "shot_0009",
+  "b": "shot_0010",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "atmosphere",
+    "severity": "high",
+    "description": "Shot A is an indoor playroom scene while Shot B is an outdoor sunny garden with a rainbow and sky, a dramatically different environment.",
+    "userConfirmed": false
+   },
+   {
+    "type": "other",
+    "severity": "high",
+    "description": "Shot A features stylized bear-costumed toddler characters in a purple-floored playroom, while Shot B features completely different diaper-wearing baby characters and a photorealistic outdoor rainbow garden, indicating incompatible visual styles and content.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case05.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F9_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F9_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F10_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F10_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case06",
+  "job": "dnc5tbis2q1glauuhottrazl",
+  "a": "shot_0004",
+  "b": "shot_0005",
+  "hint": "",
+  "flagged": [
+   {
+    "type": "lighting",
+    "severity": "medium",
+    "description": "Shot A has a cooler, more neutral daylight grade while Shot B is noticeably warmer with a golden cast from the vanity lights, making the cut feel inconsistent.",
+    "userConfirmed": false
+   }
+  ],
+  "sheet": "sheets/case06.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F4_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F4_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F5_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fdnc5tbis2q1glauuhottrazl%2Fkeyframes%2F5_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case08",
+  "job": "oxm8ye6yq1whnx1ryrvwz6j7",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case08.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case09",
+  "job": "oxm8ye6yq1whnx1ryrvwz6j7",
+  "a": "shot_0001",
+  "b": "shot_0002",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case09.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F2_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Foxm8ye6yq1whnx1ryrvwz6j7%2Fkeyframes%2F2_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case10",
+  "job": "v2testou8rhv8vd9",
+  "a": "shot_0006",
+  "b": "shot_0007",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case10.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F6_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F6_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F7_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F7_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case11",
+  "job": "w023gby4ewopkevrm0cirpm3",
+  "a": "shot_0000",
+  "b": "shot_0001",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case11.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F0_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F0_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F1_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F1_1.jpg?alt=media"
+  ],
+  "label": null
+ },
+ {
+  "id": "case13",
+  "job": "xs7iyuz3ratmzmuovs7uw8q8",
+  "a": "shot_0017",
+  "b": "shot_0018",
+  "hint": "",
+  "flagged": [],
+  "sheet": "sheets/case13.jpg",
+  "aFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F17_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F17_1.jpg?alt=media"
+  ],
+  "bFrames": [
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F18_0.jpg?alt=media",
+   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fxs7iyuz3ratmzmuovs7uw8q8%2Fkeyframes%2F18_1.jpg?alt=media"
+  ],
+  "label": null
+ }
+]
