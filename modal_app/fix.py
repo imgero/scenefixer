@@ -36,6 +36,97 @@ GRADE_TYPES = {"lighting", "atmosphere", "other"}
 # step real footage shows at its own cuts, so ordinary variation never trips it.
 CONTINUITY_REGRESSION_LUMA = 3.0
 
+# Fraction of the marker rectangle's own perimeter that has to come back red
+# before the box counts as having survived the fix. Measured over all 42
+# marker-mode fixed clips in Firestore on 2026-09-21: the two clips whose box
+# demonstrably survived scored 1.000 and 0.997, and the highest scoring clean
+# clip scored 0.062 — a red coffee mug sitting under one edge. The gap is 16x,
+# so this threshold is not finely balanced.
+MARKER_PERIMETER_COVERAGE = 0.55
+# Half-width, as a fraction of the longest frame edge, of the band searched
+# perpendicular to each rectangle edge. Covers the 8px line plus any small
+# rescale or drift the model applies.
+MARKER_SEARCH_BAND = 0.012
+
+
+def _marker_survived(fixed_clip_path: str, bboxes: list[dict]) -> float | None:
+    """
+    Fraction of the marker rectangle's perimeter that is still red, averaged
+    over the worst-affected bbox and taken as the median across sampled frames.
+    Returns None when the clip cannot be read.
+
+    Why this exists, and why it does not simply count red pixels:
+
+    The spatial signal we send aleph2 is a red rectangle burned into every
+    frame, and the prompt asks it to remove the rectangle along with the edit.
+    The model does not always comply, and nothing downstream noticed. Job
+    qp7pp7nho1r asked for removal, got a fully intact box back, and the Opus
+    verifier passed it — it was asked whether a grenade was gone, and it was.
+    So the box shipped, and the user was charged.
+
+    Counting red pixels cannot separate a surviving box from red content: a
+    clip whose subject is a red mug scored higher on raw redness than clips
+    with a faint box. The marker is specifically a thin axis-aligned rectangle
+    at coordinates we chose, so measuring how much of THAT path is red keeps
+    real red objects out of it — a mug covers one edge, a box covers four.
+    """
+    import cv2
+    import numpy as np
+
+    if not bboxes:
+        return None
+
+    def red_mask(frame):
+        b = frame[..., 0].astype(np.int16)
+        g = frame[..., 1].astype(np.int16)
+        r = frame[..., 2].astype(np.int16)
+        return (r > 140) & (g < 90) & (b < 90) & ((r - np.maximum(g, b)) > 70)
+
+    def coverage(frame, bb) -> float:
+        h, w = frame.shape[:2]
+        red = red_mask(frame)
+        band = max(3, int(MARKER_SEARCH_BAND * max(h, w)))
+        x0, y0 = bb["x"] * w, bb["y"] * h
+        x1, y1 = (bb["x"] + bb["w"]) * w, (bb["y"] + bb["h"]) * h
+        hit = total = 0
+        for t in np.linspace(0, 1, 160):
+            px, py = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
+            probes = (
+                (int(px), int(y0), False), (int(px), int(y1), False),
+                (int(x0), int(py), True), (int(x1), int(py), True),
+            )
+            for cx, cy, vertical in probes:
+                if vertical:
+                    xs = slice(max(0, cx - band), min(w, cx + band + 1))
+                    ys = slice(max(0, cy), min(h, cy + 1))
+                else:
+                    xs = slice(max(0, cx), min(w, cx + 1))
+                    ys = slice(max(0, cy - band), min(h, cy + band + 1))
+                patch = red[ys, xs]
+                if patch.size:
+                    total += 1
+                    if patch.any():
+                        hit += 1
+        return hit / total if total else 0.0
+
+    try:
+        cap = cv2.VideoCapture(fixed_clip_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        scores = []
+        for pct in (0.1, 0.3, 0.5, 0.7, 0.9):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_count * pct))
+            ok, frame = cap.read()
+            if ok:
+                scores.append(max(coverage(frame, bb) for bb in bboxes))
+        cap.release()
+    except Exception as exc:
+        print(f"  marker residue check failed: {exc}")
+        return None
+
+    if not scores:
+        return None
+    return float(sorted(scores)[len(scores) // 2])
+
 
 def _continuity_regressed(shots_ref, input_video_url, fixed_local, tmp, shot_id, ref_id):
     """
@@ -1580,7 +1671,38 @@ def fix_single_error(job_id: str, error_id: str) -> None:
         error_still_visible = verify_result.get("errorStillVisible")
         verified_resolved = error_still_visible is False
 
-        # Second gate: did the fix actually move TOWARD the shot it was told to
+        # Second gate: did our own marker come back in the picture?
+        #
+        # The red rectangle is a scaffold we add. It is never part of the
+        # user's footage, so it does not matter what the prompt asked for or
+        # what the verifier thought — if it is still there, the clip is not
+        # deliverable. The prompt bug that made this reachable is fixed in
+        # prompts.py, but a prompt is a request and this is a measurement:
+        # qp7pp7nho1r DID ask for removal and aleph2 kept the box anyway.
+        if verified_resolved and in_video_marker and target_bboxes:
+            residue = _marker_survived(fixed_local, target_bboxes)
+            if residue is not None and residue >= MARKER_PERIMETER_COVERAGE:
+                verified_resolved = False
+                verify_result = {
+                    **verify_result,
+                    "errorStillVisible": True,
+                    "markerSurvived": True,
+                    "markerPerimeterCoverage": round(residue, 3),
+                    "notes": (
+                        (verify_result.get("notes") or "")
+                        + f" [marker check: the red guide rectangle is still in "
+                          f"the returned clip — {residue:.0%} of its perimeter "
+                          f"came back red. The clip cannot be delivered.]"
+                    ),
+                }
+                print(
+                    f"  {error_id}: verifier passed but the red MARKER SURVIVED "
+                    f"({residue:.0%} of perimeter) — marking unverified"
+                )
+            elif residue is not None:
+                print(f"  {error_id}: marker residue {residue:.0%} — clean")
+
+        # Third gate: did the fix actually move TOWARD the shot it was told to
         # match? The Opus verifier answers the question it was asked — "is the
         # rain gone?" — and nothing else. On job v2testou8rhv8vd9 it passed an
         # atmosphere fix with "All frames show a sunny sky and green trees", on
@@ -1702,12 +1824,24 @@ def fix_single_error(job_id: str, error_id: str) -> None:
         except Exception as exc:  # telemetry must never fail a completed fix
             print(f"fix_completed capture failed: {exc}")
 
-        # Auto-refund credits if verification failed on the original fix (not a
-        # retry — retries are free so there's nothing to refund).
-        if error_still_visible and error.get("retryCount", 0) == 0:
-            refunded = refund_error_credits(
-                db, job_id, error_id, error, "verification_failed"
+        # Auto-refund credits if the fix is not deliverable, on the original
+        # fix only (retries are free, so there is nothing to refund).
+        #
+        # This reads verified_resolved, NOT error_still_visible. The latter is
+        # captured straight off the Opus verifier before the marker and
+        # continuity gates run, so a clip either of them rejected was kept out
+        # of the download by stitch.py — which selects on verifiedResolved —
+        # while the user stayed charged for it. It also covers the verifier
+        # returning None: undecidable is not shipped either, so it is refunded
+        # too. Refund now means exactly "we did not deliver this", which is the
+        # same rule the ship-gate applies.
+        if not verified_resolved and error.get("retryCount", 0) == 0:
+            reason = (
+                "marker_survived" if verify_result.get("markerSurvived")
+                else "continuity_regressed" if verify_result.get("continuityRegressed")
+                else "verification_failed"
             )
+            refunded = refund_error_credits(db, job_id, error_id, error, reason)
             if refunded > 0:
                 update_data["autoRefunded"] = True
 

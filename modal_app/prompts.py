@@ -386,7 +386,17 @@ def build_aleph_prompt(
     # Whole-clip transformation: lighting/atmosphere/style fix where replaceWith
     # is already a full imperative instruction (e.g. "Regrade this clip to match
     # the warm golden-hour tone of the surrounding shots"). Use it directly.
-    if fix_mode == "replace":
+    #
+    # NEVER when a red rectangle is burned into the clip. This branch returns a
+    # prompt that does not mention the rectangle at all, so aleph2 is never
+    # asked to remove it — and aleph2 keeps what it is not told to change. On
+    # job b47ouhwebj005zzyul4ot8ea (19 Sep) a WARDROBE error whose replaceWith
+    # was "Match Shot A exactly: ..." landed here, because "match" is in
+    # _TRANSFORM_VERBS, and the user downloaded a video with a red box across
+    # the middle of it. The marker branch below is the only one that may answer
+    # when a marker is present, because it is the only one that says to remove
+    # the box.
+    if fix_mode == "replace" and not in_video_marker:
         replace_with = (error.get("replaceWith") or "").strip().rstrip(".")
         if replace_with and _is_transform_instruction(replace_with):
             base = replace_with.rstrip(".")
@@ -433,6 +443,22 @@ def build_aleph_prompt(
                     f"matching the scene's existing lighting, shadows, and perspective. "
                     f"Remove the red rectangle. The result must look as if the object "
                     f"was always there."
+                )
+            if _is_transform_instruction(replace_with):
+                # "Match Shot A exactly: black leather jacket ..." is already an
+                # imperative, not a noun phrase, so it cannot be slotted into
+                # "replace the object with X" — that reads as "replace the
+                # object with Match Shot A exactly". Keep it standalone and
+                # scope it to the box instead.
+                return (
+                    f"In this video there is a red rectangle drawn on the screen "
+                    f"marking the region to correct. {replace_with}. "
+                    f"Change only what is inside the red rectangle — leave every "
+                    f"other part of the frame exactly as it is. Apply the change "
+                    f"to every frame of the clip, from the very first frame to "
+                    f"the very last. Remove the red rectangle. The final video "
+                    f"must show no rectangle anywhere, and the result must look "
+                    f"natural and seamless."
                 )
             return (
                 f"In this video there is a red rectangle drawn on the screen. "

@@ -179,7 +179,24 @@ def run_verify(job_id: str) -> dict:
             except Exception as exc:
                 print(f"verifyWarning: could not count unfixed errors ({exc})")
 
-            if len(new_errors) > unfixed > 0:
+            if unfixed == 0:
+                # Nothing was left unfixed, so "these are the ones that were
+                # not fixed" is simply false — and it was written to a real
+                # user's job (b47ouhwebj005zzyul4ot8ea, 19 Sep) whose single
+                # confirmed error had been fixed. The old chained condition
+                # `len(new_errors) > unfixed > 0` is False when unfixed is 0,
+                # so every all-fixed job fell through to the wrong branch.
+                #
+                # With nothing outstanding, a finding is either something the
+                # first detection pass missed or something the fix introduced.
+                # We cannot tell which from here, so say both.
+                update["verifyWarning"] = (
+                    f"{len(new_errors)} issue(s) found in the output. Everything "
+                    f"you asked to fix was fixed, so these were either already "
+                    f"in the original and missed the first time, or introduced "
+                    f"by the fix. Review below."
+                )
+            elif len(new_errors) > unfixed:
                 update["verifyWarning"] = (
                     f"{len(new_errors)} issue(s) found in the output — more than "
                     f"the {unfixed} left unfixed, so some may be new. Review below."
