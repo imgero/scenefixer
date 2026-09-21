@@ -10,7 +10,13 @@ LABELS={
  "case04":(0,"high","Same warm interior, continuous action: hands holding the bat, then placing it in the case. Close-up to wider."),
  "case05":(0,"high","Doors physically open between B0 and B1 revealing the garden. A deliberate transition to a new location."),
  "case06":(0,"high","Same cosplayer, same dressing room, same costume and white balance. Close-up cut to wide; apparent exposure difference is shot scale."),
- "case10":(0,"high","Crayon drawing to kids at the window. Storm clearing to sunshine inside B is intended story beat. Correctly clean in production."),
+ # CORRECTED 2026-09-21 by the owner, after looking at the whole 14-shot
+ # sequence instead of just this pair: every other shot in the film is sunny
+ # (blue sky and clouds in 0, sunlit windows in 3 and 4, rainbows in 10-13).
+ # The storm exists only at the head of shot 7 and dissolves within the shot.
+ # It was never established, so it is generative morphing, not weather. The
+ # pair in isolation reads as a story beat; the sequence says otherwise.
+ "case10":(1,"high","Shot B opens on a storm and clears to sunshine WITHIN the shot, in a film that is sunny in every other shot. Never established, so this is generative morphing. Production flagged nothing."),
 }
 out=[]
 for cid,(exp,conf,why) in LABELS.items():
@@ -22,10 +28,12 @@ for cid,(exp,conf,why) in LABELS.items():
 os.makedirs("frames",exist_ok=True)
 def regrade(src,dst,args):
     subprocess.run(["ffmpeg","-y","-v","error","-i",src,"-vf",args,dst],check=True)
+# case11 was dropped 2026-09-21: its shot A is a near-black fade-in frame, so
+# there is no content for shot B to mismatch against and "grade continuity" is
+# not defined for the pair. Every config that "missed" it was right to. Replace
+# it with a pair whose A has real content before trusting recall numbers again.
 SYN=[("case08","lighting","eq=brightness=-0.22:saturation=0.45,colorbalance=rs=-0.25:bs=0.30",
       "Shot B pushed 0.22 darker, desaturated to 0.45 and shifted strongly cool — a grade mismatch no cut would survive."),
-     ("case11","lighting","eq=brightness=0.18:saturation=1.5,colorbalance=rs=0.35:bs=-0.30",
-      "Shot B pushed 0.18 brighter, saturation 1.5x and strongly warm."),
      ("case13","lighting","eq=brightness=-0.18:contrast=1.6,colorbalance=bs=0.35",
       "Shot B darkened, contrast 1.6x and pushed blue.")]
 for cid,etype,filt,why in SYN:

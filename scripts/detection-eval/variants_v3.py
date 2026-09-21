@@ -1,15 +1,7 @@
 """Prompt variants, built as explicit edits to the production prompt."""
 import sys
 sys.path.insert(0,"/Users/alanany/Desktop/Scene Fixer")
-import os
-from modal_app.prompts import build_detection_prompt
-
-# The prompt as it shipped BEFORE 2026-09-21, kept verbatim so "v1" stays a
-# fixed baseline. Production's DETECTION_PROMPT has since absorbed the v3 gate,
-# so reading it here would silently compare the candidate against itself.
-DETECTION_PROMPT = open(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_v1_frozen.txt")
-).read()
+from modal_app.prompts import DETECTION_PROMPT, build_detection_prompt
 
 # The sentence that tells the model a false positive is cheap. It no longer is.
 OLD_BIAS = """  Shots merely LOOKING different is NOT that evidence. For AI-generated footage, dramatically different backgrounds, weather, time of day or render style within one sequence are usually generation inconsistencies, NOT intentional cuts. If in any doubt, set different_scene: false and flag the mismatch as an "atmosphere" or "lighting" error — a wrong flag costs the user one dismissed row, whereas a wrong different_scene hides every problem in the pair and reports broken footage as clean."""
@@ -75,14 +67,6 @@ def _v2_text():
 
 V2 = _v2_text()
 
-def build_v1(user_hint: str = "") -> str:
-    """The pre-2026-09-21 prompt, for baseline comparison only."""
-    hint = (user_hint or "").strip()
-    return DETECTION_PROMPT if not hint else (
-        f'USER HINT — the person who uploaded this footage said:\n  "{hint}"\n\n'
-        + DETECTION_PROMPT)
-
-
 def build_v2(user_hint: str = "") -> str:
     hint = (user_hint or "").strip()
     if not hint:
@@ -117,75 +101,3 @@ def build_v2(user_hint: str = "") -> str:
         "A false-positive is worse than a missed detection.\n\n"
         + V2
     )
-
-
-# ---------------------------------------------------------------------------
-# v4 — the owner's approach: give the model its judgement back, and teach with
-# labelled examples instead of hard rules. v3's rule list was written by hand
-# and one of its clauses ("a storm clearing to sunshine" is not an error)
-# suppressed a REAL error on case10. Exemplars carry the same lesson without
-# legislating the world.
-# ---------------------------------------------------------------------------
-
-def _exemplar(c):
-    verdict = ("NOT AN ERROR" if c["expected_errors"] == 0 else "A REAL ERROR")
-    prod = ", ".join(f["type"] for f in c.get("flagged", [])) or "nothing"
-    return (f"- Shot A/B described: {c['rationale']}\n"
-            f"  Detection originally reported: {prod}.\n"
-            f"  The film-maker's verdict: {verdict}.")
-
-def build_v4(user_hint: str = "", exemplars: list = None, exclude_id: str = None) -> str:
-    """v1's freedom + the corrected cost premise + owner-labelled exemplars."""
-    p = DETECTION_PROMPT.replace(OLD_BIAS, NEW_BIAS)
-    ex = [e for e in (exemplars or []) if e["id"] != exclude_id]
-    if ex:
-        block = (
-            "\n\n---\n\nWHAT THE FILM-MAKER HAS ALREADY TOLD US\n\n"
-            "These are real pairs from this product, each one judged by the "
-            "person whose film it is. They are not rules and they do not "
-            "enumerate the world — they are calibration. Read them for the "
-            "KIND of judgement being asked for, then apply your own to the "
-            "frames in front of you.\n\n"
-            + "\n".join(_exemplar(c) for c in ex)
-            + "\n\nThe pattern across these: two shots are supposed to differ. "
-              "What is being asked is not 'do these frames differ' but 'would "
-              "the person who made this call it a mistake'. Use your own eyes "
-              "and your own judgement on the pair below — if you believe "
-              "something is genuinely wrong, say so even if it resembles one "
-              "of the examples above.")
-        anchor = "\n\nFor each error return:"
-        p = p.replace(anchor, block + anchor, 1)
-    if not (user_hint or "").strip():
-        return p
-    return (
-        "USER HINT — the person who uploaded this footage said:\n"
-        f'  "{user_hint.strip()}"\n\n'
-        "How to use this hint:\n"
-        "1. A SPECIFIC claim — naming a thing, a shot, or a change — is the "
-        "film-maker telling you what is wrong with their own film. They know "
-        "their intent and you do not. If you can see what they describe, "
-        "REPORT IT, whatever the examples below would otherwise suggest.\n"
-        "2. A GENERIC checklist ('check wardrobe, hair, props, lighting, "
-        "background') is them naming everything they can think of, not a "
-        "claim that each one is wrong. It does not raise the odds that any "
-        "particular error is present.\n"
-        "3. You must VISUALLY CONFIRM anything you flag. Honest 'I don't see "
-        "it' beats confident hallucination.\n\n" + p)
-
-
-def build_v5(user_hint: str = "", exemplars: list = None, exclude_id: str = None) -> str:
-    """v3's intent gate PLUS owner-labelled exemplars. Rules give the floor
-    while the label set is small; exemplars carry the cases the rules get
-    wrong, and they are the half that grows."""
-    base = build_v2(user_hint)          # v3 text (gate + hint override)
-    ex = [e for e in (exemplars or []) if e["id"] != exclude_id]
-    if not ex:
-        return base
-    block = ("\n\n---\n\nWHAT THE FILM-MAKER HAS ALREADY TOLD US\n\n"
-             "Real pairs from this product, each judged by the person whose "
-             "film it is. Calibration, not rules — and they OUTRANK the test "
-             "above wherever the two disagree, because they are this film-"
-             "maker's own judgement.\n\n"
-             + "\n".join(_exemplar(c) for c in ex))
-    anchor = "\n\nFor each error return:"
-    return base.replace(anchor, block + anchor, 1)

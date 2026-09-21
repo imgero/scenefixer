@@ -220,6 +220,53 @@ def sample_shots_for_standalone(shots: list[dict]) -> list[dict]:
 _RETRY_DELAYS = (5, 15, 45)  # seconds between attempts on 529
 
 
+def _first_text(response) -> str:
+    """
+    The first text block of a response.
+
+    Not content[0]: on models where thinking is on, content[0] is a
+    ThinkingBlock and .text raises AttributeError. Opus 5 has thinking on by
+    default (Opus 4.8 does not), so reading content[0] is what made a first
+    attempt at comparing the two models report Opus 5 as broken.
+    """
+    for block in response.content:
+        if getattr(block, "type", "") == "text":
+            return block.text
+    return ""
+
+
+_EXEMPLAR_CACHE: dict = {}
+
+
+def load_exemplars(limit: int = 40) -> list[dict]:
+    """
+    The owner's verdicts from the training queue, newest first.
+
+    These are read once per worker process and reused: detection runs many
+    pairs per job and they all deserve the same calibration. A failure here
+    must never fail detection — an empty list just means the prompt runs on
+    its written rules alone, which is what it did before this existed.
+    """
+    if "rows" in _EXEMPLAR_CACHE:
+        return _EXEMPLAR_CACHE["rows"]
+    rows: list[dict] = []
+    try:
+        db = get_db()
+        snap = (
+            db.collection("detection_labels")
+            .order_by("labelledAt", direction="DESCENDING")
+            .limit(limit)
+            .get()
+        )
+        rows = [d.to_dict() or {} for d in snap]
+        print(f"detection: loaded {len(rows)} owner-labelled exemplar(s)")
+    except Exception as exc:
+        print(f"detection: could not load exemplars ({exc}) — running on rules alone")
+        rows = []
+    _EXEMPLAR_CACHE["rows"] = rows
+    return rows
+
+
 def _create_with_retry(client: anthropic.Anthropic, **kwargs):
     """Wrap client.messages.create with retries for transient 529 overload errors."""
     for attempt in range(len(_RETRY_DELAYS) + 1):
@@ -467,15 +514,27 @@ def compare_pair(
     for i, url in enumerate(urls_b, start=1):
         content.append({"type": "text", "text": f"SHOT B · frame {i}/{len(urls_b)}"})
         content.append({"type": "image", "source": {"type": "url", "url": url}})
-    content.append({"type": "text", "text": build_detection_prompt(user_hint)})
+    content.append({
+        "type": "text",
+        "text": build_detection_prompt(user_hint, load_exemplars()),
+    })
 
+    # Opus 5 on this call specifically, measured against
+    # scripts/detection-eval on 2026-09-21: 94% of findings on labelled clean
+    # pairs were false positives on opus-4-8 with the old prompt, 11% on this
+    # pairing, at equal recall. Same price per token as 4.8.
+    #
+    # It needs its own configuration. Thinking is ON by default on Opus 5 and
+    # OFF on 4.8, and thinking counts against max_tokens — at the old budget of
+    # 1024 every response truncated mid-JSON and parsed as nothing.
     response = _create_with_retry(client,
-        model="claude-opus-4-8",
-        max_tokens=1024,
+        model="claude-opus-5",
+        max_tokens=4000,
+        thinking={"type": "adaptive"},
         messages=[{"role": "user", "content": content}],
     )
 
-    raw = response.content[0].text.strip()
+    raw = _first_text(response).strip()
     # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -552,7 +611,7 @@ def detect_standalone(job_id: str, shot: dict, user_hint: str = "") -> list[dict
         messages=[{"role": "user", "content": content}],
     )
 
-    raw = response.content[0].text.strip()
+    raw = _first_text(response).strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -716,7 +775,7 @@ def detect_holistic(
             max_tokens=1024,
             messages=[{"role": "user", "content": content}],
         )
-        raw = response.content[0].text.strip()
+        raw = _first_text(response).strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):

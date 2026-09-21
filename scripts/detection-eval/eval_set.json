@@ -256,9 +256,9 @@
    "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fv2testou8rhv8vd9%2Fkeyframes%2F7_1.jpg?alt=media"
   ],
   "label": null,
-  "expected_errors": 0,
+  "expected_errors": 1,
   "confidence": "high",
-  "rationale": "Crayon drawing to kids at the window. Storm clearing to sunshine inside B is intended story beat. Correctly clean in production.",
+  "rationale": "Shot B opens on a storm and clears to sunshine WITHIN the shot, in a film that is sunny in every other shot. Never established, so this is generative morphing. Production flagged nothing.",
   "kind": "real",
   "frames": {
    "A": [
@@ -301,39 +301,6 @@
    "B": [
     "frames/case08_syn_B0.jpg",
     "frames/case08_syn_B1.jpg"
-   ]
-  }
- },
- {
-  "id": "case11_syn",
-  "job": "w023gby4ewopkevrm0cirpm3",
-  "a": "shot_0000",
-  "b": "shot_0001",
-  "hint": "",
-  "flagged": [],
-  "sheet": "sheets/case11.jpg",
-  "aFrames": [
-   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F0_0.jpg?alt=media",
-   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F0_1.jpg?alt=media"
-  ],
-  "bFrames": [
-   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F1_0.jpg?alt=media",
-   "https://firebasestorage.googleapis.com/v0/b/scenefixer.firebasestorage.app/o/jobs%2Fw023gby4ewopkevrm0cirpm3%2Fkeyframes%2F1_1.jpg?alt=media"
-  ],
-  "label": null,
-  "kind": "synthetic",
-  "expected_errors": 1,
-  "expected_type": "lighting",
-  "confidence": "high",
-  "rationale": "Shot B pushed 0.18 brighter, saturation 1.5x and strongly warm.",
-  "frames": {
-   "A": [
-    "frames/case11_A0.jpg",
-    "frames/case11_A1.jpg"
-   ],
-   "B": [
-    "frames/case11_syn_B0.jpg",
-    "frames/case11_syn_B1.jpg"
    ]
   }
  },

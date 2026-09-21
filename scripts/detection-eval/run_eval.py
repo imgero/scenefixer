@@ -18,7 +18,7 @@ for line in open("/Users/alanany/Desktop/Scene Fixer/.env.local"):
 import anthropic
 from modal_app.prompts import build_detection_prompt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from variants import build_v2
+from variants import build_v1, build_v2, build_v4, build_v5
 
 PRICES = {"claude-opus-5": (5.0, 25.0), "claude-opus-4-8": (5.0, 25.0),
           "claude-sonnet-5": (2.0, 10.0), "claude-haiku-4-5": (1.0, 5.0)}
@@ -63,7 +63,7 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=1024, dest="max_tokens")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--label", default="")
-    ap.add_argument("--prompt", default="v1", choices=["v1","v2"])
+    ap.add_argument("--prompt", default="v1", choices=["v1","v2","v4","v5","prod"])
     a = ap.parse_args()
     cases = json.load(open("eval_set.json"))
     client = anthropic.Anthropic()
@@ -71,7 +71,16 @@ def main():
     def one(t):
         c, _ = t
         try:
-            return (c, *call(client, c, a, build_detection_prompt if a.prompt=="v1" else build_v2))
+            if a.prompt=="v1": fn=build_v1
+            elif a.prompt=="v2": fn=build_v2
+            elif a.prompt=="v4":
+                # leave-one-out: a case never sees its own label
+                fn=lambda hint,_c=c: build_v4(hint, cases, exclude_id=_c["id"])
+            elif a.prompt=="prod":
+                fn=build_detection_prompt   # whatever is shipping right now
+            else:
+                fn=lambda hint,_c=c: build_v5(hint, cases, exclude_id=_c["id"])
+            return (c, *call(client, c, a, fn))
         except Exception as e:
             return (c, None, None, f"EXC {type(e).__name__}: {str(e)[:120]}")
     with concurrent.futures.ThreadPoolExecutor(6) as ex:

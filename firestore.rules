@@ -76,5 +76,14 @@ service cloud.firestore {
     match /cache/{cacheId} {
       allow read, write: if false;
     }
+
+    // The owner's detection verdicts from /admin/training. Written only by the
+    // admin API route with the Admin SDK, and read only by the detection
+    // worker, which also uses the Admin SDK — both bypass these rules. Nothing
+    // in the browser has any business here: these labels steer what every
+    // user's job gets flagged for.
+    match /detection_labels/{pairId} {
+      allow read, write: if false;
+    }
   }
 }

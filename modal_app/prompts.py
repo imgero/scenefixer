@@ -45,11 +45,59 @@ Rules:
 - DO NOT flag action progression (characters moved naturally), extras repositioning, or intentional scene transitions.
 - different_scene means ONLY "these two shots are not supposed to MATCH IN LOOK". It does NOT mean "stop looking". Set it true when the two shots are a deliberate narrative cut, then CARRY ON and report any object-level errors you can still see. A character whose jacket changes colour is a continuity error whether or not the scene changed around them.
   Set different_scene: true only when you can point to POSITIVE evidence of an intentional cut — a different location with a different cast, a title/time card, an obvious flashback grade, a scene that plainly happens elsewhere or elsewhen in the story.
-  Shots merely LOOKING different is NOT that evidence. For AI-generated footage, dramatically different backgrounds, weather, time of day or render style within one sequence are usually generation inconsistencies, NOT intentional cuts. If in any doubt, set different_scene: false and flag the mismatch as an "atmosphere" or "lighting" error — a wrong flag costs the user one dismissed row, whereas a wrong different_scene hides every problem in the pair and reports broken footage as clean.
+  Shots merely LOOKING different is NOT that evidence — but neither is a difference automatically a defect. For AI-generated footage a dramatically different background, weather or render style CAN be a generation inconsistency. It can equally be the sequence doing what it was written to do. Decide which, and say so.
+  What a wrong flag costs: every error you report is offered to the user as a paid repair. If they buy it, we spend real money re-generating footage that was never broken, hand them back a video we have degraded, and refund them. A false positive is not one dismissed row — it is a damaged delivery. Weigh it accordingly against a missed detection.
   If the shots share a subject (the same character, the same room, the same object), that is strong evidence they are the SAME scene. Set different_scene: false.
 - When different_scene is true, still return object-level errors (prop, wardrobe, hair, set_dressing) in "errors". Only omit lighting / atmosphere / style errors, since those describe a look the two shots were never meant to share.
 - Without a user hint: 1–3 high-confidence errors is better than 8 uncertain ones.
 - With a user hint at the top: trust it and flag what they described.
+
+---
+
+IS THIS A MISTAKE, OR IS THE SCENE DOING ITS JOB?
+
+Apply this test to every candidate before you report it — UNLESS a specific
+user note above already describes it, in which case the note wins and you
+report it. Two shots in a sequence are SUPPOSED to differ. A continuity error
+is a difference that NOBODY INTENDED — something a careful viewer would call a
+mistake, not a change they would read as the film progressing.
+
+These are NOT errors. Do not report them:
+- SHOT SCALE. A close-up cut against a wide of the same subject. Skin, faces
+  and walls fill different amounts of frame, so exposure and apparent grade
+  differ. That is lensing, not a grade mismatch.
+- POINT OF VIEW. A shot through a scope, binoculars, a viewfinder, a window,
+  underwater, or any in-world optic. Vignetting, desaturation and softness are
+  the device, not a defect.
+- TIME PASSING BETWEEN THE SHOTS. A fireball in A becoming a smoke column in
+  B, a candle burning lower, dust settling. The scene is allowed to advance
+  across a cut.
+  This excuse applies ONLY to a difference BETWEEN the two shots, where each
+  shot is internally consistent. It does NOT cover a change that happens
+  ACROSS THE FRAMES OF ONE SHOT. Weather, daylight and location do not change
+  within a single continuous shot a few seconds long. If SHOT B's own frames
+  go from storm to sunshine, from interior to exterior, or from one backdrop
+  to another, that is the generator losing the scene, not time passing —
+  report it, and say which frames of B it happens between.
+- A TRANSITION THE FOOTAGE ITSELF SHOWS. Doors opening onto somewhere new, a
+  character walking through a portal or gateway, a vehicle arriving somewhere
+  else. If the frames show the move happening, the new location is intended.
+- ACTION PROGRESSING. Characters have moved, picked things up, changed pose.
+  A garment reads differently because the body under it moved or because part
+  of it is now out of frame or occluded. Judge the GARMENT, not how much of it
+  you can see.
+- DELIBERATE STYLISTIC CHANGE. A title montage escalating, a graphic-novel or
+  animated sequence changing density or palette for effect.
+
+Still report, as before:
+- Two shots that are plainly the same setup and moment, where the grade,
+  exposure or colour temperature genuinely does not match across the cut.
+- An object, garment or hairstyle that is genuinely a DIFFERENT object,
+  garment or hairstyle — not the same one seen from elsewhere.
+- Anything in the STANDALONE, TEMPORAL/CAUSATION lists above.
+
+If you cannot name, in one clause, what the mistake is and why a viewer would
+read it as a mistake rather than as the scene progressing, do not report it.
 
 For each error return:
 - type: one of [prop, wardrobe, lighting, hair, set_dressing, eyeline, atmosphere, other]
@@ -199,17 +247,76 @@ def build_standalone_prompt(user_hint: str = "") -> str:
     )
 
 
-def build_detection_prompt(user_hint: str = "") -> str:
-    """Detection prompt, optionally prefixed with the user's own intent."""
+def format_exemplars(labels: list[dict]) -> str:
+    """
+    Turn the owner's verdicts from the training queue into calibration text.
+
+    Rules written by hand overfit: the first version of the gate above listed
+    "a storm clearing to sunshine" as not-an-error, and that clause suppressed
+    a REAL error — a film that is sunny in all fourteen shots except a storm
+    the generator invented at the head of one. Examples carry the same lesson
+    without legislating the world, and unlike rules they accumulate.
+
+    Measured 2026-09-21 on the labelled set: gate alone 17% false positives,
+    exemplars alone 28%, both together 11%. Keep both.
+    """
+    if not labels:
+        return ""
+    lines = []
+    for lab in labels:
+        verdict = {
+            "correct": "A REAL ERROR",
+            "false_positive": "NOT AN ERROR",
+            "missed": "A REAL ERROR WE FAILED TO REPORT",
+            "clean": "NOTHING WRONG — correctly reported nothing",
+        }.get(lab.get("verdict", ""), None)
+        if not verdict:
+            continue
+        note = (lab.get("note") or "").strip()
+        reported = lab.get("errorType") or "nothing"
+        lines.append(
+            f"- We reported: {reported}. The film-maker's verdict: {verdict}."
+            + (f" They said: {note}" if note else "")
+        )
+    if not lines:
+        return ""
+    return (
+        "\n\n---\n\nWHAT THE FILM-MAKER HAS ALREADY TOLD US\n\n"
+        "Real pairs from this product, each judged by the person whose film it "
+        "is. These are calibration, not rules, and they OUTRANK the test above "
+        "wherever the two disagree — it is their film and their judgement.\n\n"
+        + "\n".join(lines)
+        + "\n\nRead them for the KIND of judgement being asked for, then apply "
+          "your own to the frames below. If you believe something is genuinely "
+          "wrong, say so even if it resembles one of these examples."
+    )
+
+
+def build_detection_prompt(user_hint: str = "", exemplars: list[dict] | None = None) -> str:
+    """Detection prompt, plus the user's own intent and the owner's calibration."""
+    body = DETECTION_PROMPT
+    block = format_exemplars(exemplars or [])
+    if block:
+        anchor = "\n\nFor each error return:"
+        body = body.replace(anchor, block + anchor, 1)
     hint = (user_hint or "").strip()
     if not hint:
-        return DETECTION_PROMPT
+        return body
     return (
         "USER HINT — the person who uploaded this footage said:\n"
         f'  "{hint}"\n\n'
         "How to use this hint:\n"
-        "1. The hint tells you WHERE to look and WHAT KIND of error to search "
-        "for. Search the frames methodically with that in mind.\n"
+        "1. WEIGH IT BY HOW SPECIFIC IT IS.\n"
+        "   - A SPECIFIC claim — naming a thing, a shot, or a change ('his "
+        "jacket changes colour', 'the sky is wrong in the third shot') — is "
+        "the film-maker telling you what is wrong with their own film. They "
+        "know their intent and you do not. If you can see what they describe, "
+        "REPORT IT, even if the test below would otherwise read it as "
+        "intentional. Their note overrides that test.\n"
+        "   - A GENERIC checklist ('check wardrobe, hair, props, lighting, "
+        "background') is them naming everything they can think of, not a claim "
+        "that each one is wrong. It does not raise the odds that any "
+        "particular error is present, and the test below still applies.\n"
         "2. CRITICAL: you must VISUALLY CONFIRM the error in the actual frames "
         "before flagging. The hint is a guide, NOT a guarantee. Do not invent "
         "errors that match the hint's description if you cannot see them.\n"
@@ -220,7 +327,7 @@ def build_detection_prompt(user_hint: str = "") -> str:
         "clip — that's fine, other pairs may catch it.\n"
         "5. Honest 'I don't see it' is much better than confident hallucination. "
         "A false-positive is worse than a missed detection.\n\n"
-        + DETECTION_PROMPT
+        + body
     )
 
 
