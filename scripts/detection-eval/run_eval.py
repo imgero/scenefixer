@@ -34,6 +34,13 @@ def call(client, case, args, prompt_fn):
     for i, p in enumerate(case["frames"]["B"], 1):
         content += [{"type": "text", "text": f"SHOT B · frame {i}/{len(case['frames']['B'])}"},
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64(p)}}]
+    # Cache the frames. They are ~8k tokens per case and are byte-identical
+    # across every run of a sweep and across sweeps, while only the prompt
+    # after them changes. Without this the 2026-09-21 comparison re-sent 2.1M
+    # image tokens and cost $13 — most of it paying full price for the same
+    # pictures 250 times. Cached reads are ~10% of the input rate.
+    if content:
+        content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
     content.append({"type": "text", "text": prompt_fn(case.get("hint", ""))})
     kw = dict(model=args.model, max_tokens=args.max_tokens,
               messages=[{"role": "user", "content": content}])
@@ -86,11 +93,13 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(6) as ex:
         res = list(ex.map(one, jobs))
     per = collections.defaultdict(list)
-    tin = tout = 0
+    tin = tout = tcreate = tread = 0
     fails = 0
     for c, errs, usage, err in res:
         if usage:
             tin += usage.input_tokens; tout += usage.output_tokens
+            tcreate += getattr(usage, "cache_creation_input_tokens", 0) or 0
+            tread += getattr(usage, "cache_read_input_tokens", 0) or 0
         if errs is None:
             fails += 1; continue
         per[c["id"]].append(errs)
@@ -117,9 +126,17 @@ def main():
         rec += hit; n_pos += len(runs)
         print(f"    {c['id']:12s} caught {hit}/{len(runs)} runs")
     ip, op = PRICES.get(a.model, (5.0, 25.0))
-    cost = tin/1e6*ip + tout/1e6*op
+    # cache writes ~1.25x input rate, cache reads ~0.1x
+    cost = (tin/1e6*ip + tout/1e6*op
+            + tcreate/1e6*ip*1.25 + tread/1e6*ip*0.10)
     n = max(1, len(res)-fails)
     print(f"\n  FALSE POSITIVE RATE : {fp_calls}/{n_neg} negative runs flagged something  ({100*fp_calls/max(1,n_neg):.0f}%)")
     print(f"  RECALL ON POSITIVES : {rec}/{n_pos}  ({100*rec/max(1,n_pos):.0f}%)")
-    print(f"  cost: ${cost:.4f} for {n} calls = ${cost/n:.5f}/pair   ({tin} in, {tout} out)")
+    saved = tread/1e6*ip*0.90
+    print(f"  cost: ${cost:.4f} for {n} calls = ${cost/n:.5f}/pair"
+          f"   ({tin} in, {tout} out, {tcreate} cache-write, {tread} cache-read)")
+    if tread:
+        print(f"  prompt cache saved ~${saved:.2f} on this sweep")
+    elif tcreate:
+        print("  cache primed — the next sweep within the TTL reads it back at ~10%")
 main()

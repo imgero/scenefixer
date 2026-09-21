@@ -115,6 +115,21 @@ export async function GET(req: NextRequest) {
 }
 
 /**
+ * Firestore rejects document ids that contain a slash, that are "." or "..",
+ * or that match __.*__ — its own reserved pattern. An id like that used to
+ * take the write path down with an unhandled exception and an empty 500,
+ * which is indistinguishable from the database being broken. Real pair ids
+ * (jobId__shotA__shotB) never look like this; a hand-made one can.
+ */
+function invalidDocId(id: string): string | null {
+  if (!id || id.length > 1500) return "pairId is empty or too long";
+  if (id.includes("/")) return "pairId cannot contain '/'";
+  if (id === "." || id === "..") return "pairId cannot be '.' or '..'";
+  if (/^__.*__$/.test(id)) return "pairId cannot start and end with '__'";
+  return null;
+}
+
+/**
  * POST — record one verdict.
  *
  * verdict:
@@ -143,22 +158,32 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  const bad = invalidDocId(String(pairId));
+  if (bad) return NextResponse.json({ error: bad }, { status: 400 });
 
-  await adminDb.collection("detection_labels").doc(pairId).set(
-    {
-      pairId,
-      jobId: jobId ?? null,
-      shotAId: shotAId ?? null,
-      shotBId: shotBId ?? null,
-      errorId: errorId ?? null,
-      errorType: errorType ?? null,
-      verdict,
-      note: String(note ?? "").trim(),
-      labelledBy: auth.email,
-      labelledAt: new Date(),
-    },
-    { merge: true },
-  );
+  try {
+    await adminDb.collection("detection_labels").doc(pairId).set(
+      {
+        pairId,
+        jobId: jobId ?? null,
+        shotAId: shotAId ?? null,
+        shotBId: shotBId ?? null,
+        errorId: errorId ?? null,
+        errorType: errorType ?? null,
+        verdict,
+        note: String(note ?? "").trim(),
+        labelledBy: auth.email,
+        labelledAt: new Date(),
+      },
+      { merge: true },
+    );
+  } catch (e) {
+    // Say what went wrong. A verdict silently failing to save is worse than
+    // useless here — the reviewer moves on believing it was recorded.
+    const msg = e instanceof Error ? e.message : "unknown error";
+    console.error("detection_labels write failed", pairId, msg);
+    return NextResponse.json({ error: `Could not save: ${msg}` }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true, pairId, verdict });
 }
@@ -171,6 +196,13 @@ export async function DELETE(req: NextRequest) {
   if (!pairId) {
     return NextResponse.json({ error: "pairId required" }, { status: 400 });
   }
-  await adminDb.collection("detection_labels").doc(pairId).delete();
+  const bad = invalidDocId(pairId);
+  if (bad) return NextResponse.json({ error: bad }, { status: 400 });
+  try {
+    await adminDb.collection("detection_labels").doc(pairId).delete();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "unknown error";
+    return NextResponse.json({ error: `Could not delete: ${msg}` }, { status: 500 });
+  }
   return NextResponse.json({ ok: true, deleted: pairId });
 }

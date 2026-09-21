@@ -62,6 +62,9 @@ export default function TrainingPage() {
   const [saving, setSaving] = useState<string | null>(null);
   const [showSeq, setShowSeq] = useState<Record<string, boolean>>({});
   const [onlyOpen, setOnlyOpen] = useState(true);
+  // Which frame is open full-size. The frames are the entire input detection
+  // gets, and at strip size you cannot actually see what it saw.
+  const [zoom, setZoom] = useState<{ src: string; caption: string } | null>(null);
 
   // Always a FRESH id token: these sit open for a long review session and a
   // cached one expires after an hour, which would look like "not an admin".
@@ -147,6 +150,21 @@ export default function TrainingPage() {
     }
   }
 
+  useEffect(() => {
+    if (!zoom) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoom(null);
+    };
+    window.addEventListener("keydown", onKey);
+    // The page behind a lightbox should not scroll away under it.
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [zoom]);
+
   const visible = useMemo(
     () => (onlyOpen ? rows.filter((r) => !r.label) : rows),
     [rows, onlyOpen],
@@ -210,6 +228,23 @@ export default function TrainingPage() {
         <p style={S.sub}>Nothing left in the queue. Refresh after the next few jobs.</p>
       )}
 
+      {zoom && (
+        <div
+          style={S.overlay}
+          onClick={() => setZoom(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label={zoom.caption}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={zoom.src} alt={zoom.caption} style={S.zoomImg} />
+          <div style={S.caption}>{zoom.caption}</div>
+          <button style={S.close} onClick={() => setZoom(null)} aria-label="Close">
+            ✕
+          </button>
+        </div>
+      )}
+
       {visible.map((row) => (
         <section key={row.pairId} style={S.card}>
           <header style={S.head}>
@@ -241,18 +276,40 @@ export default function TrainingPage() {
             <div style={S.col}>
               <div style={S.tag}>SHOT A — reference</div>
               <div style={S.strip}>
-                {row.a.frames.map((u) => (
+                {row.a.frames.map((u, i) => (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img key={u} src={u} alt="shot A frame" style={S.img} />
+                  <img
+                    key={u}
+                    src={u}
+                    alt={`shot ${row.a.index} frame ${i + 1}`}
+                    style={S.img}
+                    onClick={() =>
+                      setZoom({
+                        src: u,
+                        caption: `SHOT A — shot ${row.a.index}, frame ${i + 1} of ${row.a.frames.length}`,
+                      })
+                    }
+                  />
                 ))}
               </div>
             </div>
             <div style={S.col}>
               <div style={S.tag}>SHOT B — under review</div>
               <div style={S.strip}>
-                {row.b.frames.map((u) => (
+                {row.b.frames.map((u, i) => (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img key={u} src={u} alt="shot B frame" style={S.img} />
+                  <img
+                    key={u}
+                    src={u}
+                    alt={`shot ${row.b.index} frame ${i + 1}`}
+                    style={S.img}
+                    onClick={() =>
+                      setZoom({
+                        src: u,
+                        caption: `SHOT B — shot ${row.b.index}, frame ${i + 1} of ${row.b.frames.length}`,
+                      })
+                    }
+                  />
                 ))}
               </div>
             </div>
@@ -275,7 +332,10 @@ export default function TrainingPage() {
                     key={s.index}
                     src={s.frame}
                     alt={`shot ${s.index}`}
-                    title={`shot ${s.index}`}
+                    title={`shot ${s.index} — click to enlarge`}
+                    onClick={() =>
+                      setZoom({ src: s.frame!, caption: `shot ${s.index} of ${row.shotCount}` })
+                    }
                     style={{
                       ...S.thumb,
                       outline:
@@ -357,9 +417,13 @@ const S: Record<string, React.CSSProperties> = {
   col: {},
   tag: { fontSize: 11, letterSpacing: ".06em", color: "#888", marginBottom: 4 },
   strip: { display: "flex", gap: 4 },
-  img: { width: "100%", minWidth: 0, borderRadius: 6, background: "#000", objectFit: "cover" },
+  img: { width: "100%", minWidth: 0, borderRadius: 6, background: "#000", objectFit: "cover", cursor: "zoom-in" },
+  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,.92)", zIndex: 1000, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, padding: 24, cursor: "zoom-out" },
+  zoomImg: { maxWidth: "100%", maxHeight: "86vh", objectFit: "contain", borderRadius: 6 },
+  caption: { color: "#ddd", fontSize: 13, letterSpacing: ".04em" },
+  close: { position: "fixed", top: 16, right: 20, background: "transparent", border: "none", color: "#fff", fontSize: 26, cursor: "pointer", lineHeight: 1 },
   seq: { display: "flex", gap: 4, overflowX: "auto", margin: "10px 0", paddingBottom: 4 },
-  thumb: { height: 74, borderRadius: 4, background: "#000" },
+  thumb: { height: 74, borderRadius: 4, background: "#000", cursor: "zoom-in" },
   desc: { fontSize: 14, margin: "10px 0 0", lineHeight: 1.5 },
   hint: { fontSize: 13, color: "#666", margin: "8px 0 0", fontStyle: "italic" },
   textarea: { width: "100%", minHeight: 54, marginTop: 10, padding: 8, borderRadius: 6, border: "1px solid #ddd", fontFamily: "inherit", fontSize: 13, boxSizing: "border-box" },
