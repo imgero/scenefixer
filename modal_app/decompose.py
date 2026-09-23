@@ -38,25 +38,68 @@ def download_video(job_id: str, input_url: str, dest_dir: str) -> str:
     return dest
 
 
-def transcode_to_720p(input_path: str, output_path: str) -> str:
+def transcode_to_720p(input_path: str, output_path: str, crop: str | None = None) -> str:
     """
-    Re-encode to 1280x720 H.264 — preserves aspect ratio with black bars
-    instead of stretching. Pulp Fiction is 1.85:1, GoT is 1.78:1 etc.;
-    forcing all to 16:9 with `scale=1280:720` (no padding) squashed them.
+    THE normalized source. Bars off, fitted inside 1280x720, NEVER padded.
+
+    This used to pad every upload into a full 1280x720 frame. Padding was not
+    arbitrary — it made a bbox well defined, because a normalised box only
+    means something against a known frame. It also cost us the three things
+    this function now exists to prevent:
+
+      - **Detection read mostly black.** A portrait clip padded into 16:9 is
+        ~28% picture. On the upload that exposed this the keyframe handed to
+        the detector was 1280x720 carrying 361px of content, so ~72% of every
+        image token bought a black bar.
+      - **The fix engines painted into the bars.** extract_clip's own docstring
+        records it: aleph2 "treats them as canvas", and the first corrected
+        clip "came back with the bars filled in with invented houses and lawn".
+        That hazard applied to every portrait upload, which stitch.py notes is
+        "the format most of our uploads arrive in".
+      - **Output quality.** post_process scales the SHORT side by orientation,
+        but a padded portrait video IS landscape at frame level, so it took the
+        landscape branch and left ~241x480 of picture from a 540x1080 source.
+
+    Dropping the pad costs nothing on 16:9 input — scale-to-fit already lands
+    on 1280x720 and the pad was a no-op — so this changes nothing for landscape
+    footage and everything for the rest.
+
+    The invariant the whole pipeline now leans on: keyframes, fix clips and the
+    stitched output all carry the SOURCE's aspect ratio and no padding, so a
+    normalised bbox is portable between them with no transform.
+
+    `crop` is the caller's, from detect_content_crop, so the bars are measured
+    exactly ONCE per job and every stage applies the same numbers. Re-deriving
+    it per stage would let two stages disagree about where the picture is.
     """
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", input_path,
-            "-vf",
-            "scale=1280:720:force_original_aspect_ratio=decrease,"
-            "pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
-            "-c:v", "libx264", "-crf", "23",
-            "-c:a", "aac",
-            output_path,
-        ],
-        check=True,
-        capture_output=True,
-    )
+    scale = "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2"
+
+    def _run(vf: str):
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", input_path,
+                "-vf", vf,
+                "-c:v", "libx264", "-crf", "23",
+                "-c:a", "aac",
+                output_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    if crop:
+        print(f"Normalizing source: cutting baked-in bars {crop}")
+        try:
+            _run(f"{crop},{scale}")
+            return output_path
+        except subprocess.CalledProcessError as exc:
+            # Never let the crop be the reason a job dies. An uncropped
+            # normalized source is the old behaviour, which is survivable;
+            # no normalized source at all is not.
+            stderr = (exc.stderr or b"").decode("utf-8", "replace")[-300:]
+            print(f"Crop failed ({stderr}); normalizing without it")
+
+    _run(scale)
     return output_path
 
 
@@ -65,7 +108,7 @@ def detect_content_crop(input_path: str) -> str | None:
     Find bars that are black in EVERY frame, and return an ffmpeg crop for the
     picture inside them. Returns None when the frame is already all content.
 
-    transcode_for_detection stopped us ADDING letterboxing. It cannot help when
+    Scaling without padding stopped us ADDING letterboxing. It cannot help when
     the bars arrive baked into the upload's pixels, which is what a portrait
     clip exported from a landscape NLE timeline looks like — and that export is
     a default, not a mistake.
@@ -128,59 +171,46 @@ def detect_content_crop(input_path: str) -> str | None:
 
     return f"crop={w}:{h}:{x}:{y}"
 
-def transcode_for_detection(input_path: str, output_path: str) -> str:
+
+
+def apply_content_crop(input_path: str, output_path: str, crop: str | None) -> str:
     """
-    A 720p copy with NO letterboxing, used only to find shot boundaries.
+    Cut known bars off a video at its NATIVE resolution. No-op without a crop.
 
-    Scene detection compares consecutive frames across the whole frame. On a
-    portrait video padded into a 16:9 box, roughly two thirds of every frame is
-    identical black, so every real cut's score is divided by three and lands
-    under the threshold. Measured on a live user's 12.63s clip, same detector,
-    same threshold: 6 scenes at its native 410x720, and ZERO once padded to
-    1280x720.
+    stitch.py and fix.py both read the user's original upload rather than the
+    normalized copy, and they are right to: the normalized copy is capped at
+    1280x720, so feeding it to stitch would rebuild a 1920x1080 upload's
+    untouched shots at 720p and quietly downgrade every pro and studio render.
 
-    The effect is that portrait uploads — most short-form AI video — were being
-    analysed as one enormous shot containing many undetected cuts. Detection
-    then reported the cuts as "the background environment shifts across frames",
-    the fix asked a model to merge several different scenes into one, which
-    cannot be done, and the verifier correctly rejected the result. A large part
-    of the unfixable-error problem is this one line of ffmpeg.
+    They still must not see the bars — stitch would otherwise splice cropped
+    fixed shots against uncropped originals, with the bars appearing and
+    disappearing at every cut. So the crop travels as numbers on the job
+    (`contentCrop`) and is applied here, full size, wherever the original is
+    read.
 
-    Bars already baked into the upload survive that scale, so they are found and
-    cut first — see detect_content_crop.
-
-    Boundaries found here are timestamps, so they apply unchanged to the padded
-    transcode that everything downstream uses. The crop is confined to this copy
-    on purpose: keyframes, the fix and the delivered file keep the user's own
-    framing, bars included. We are changing what the DETECTOR sees, not what the
-    user gets.
+    Returns input_path untouched when there is nothing to cut, so callers can
+    assign unconditionally.
     """
-    crop = detect_content_crop(input_path)
-    if crop:
-        print(f"Cropping baked-in bars before detection: {crop}")
-    vf = "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2"
-    if crop:
-        vf = f"{crop},{vf}"
-
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", input_path,
-            "-vf", vf,
-            "-c:v", "libx264", "-crf", "23",
-            "-an",
-            output_path,
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return output_path
+    if not crop:
+        return input_path
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", input_path, "-vf", crop,
+             "-c:v", "libx264", "-crf", "18", "-c:a", "copy", output_path],
+            check=True, capture_output=True,
+        )
+        return output_path
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", "replace")[-300:]
+        print(f"apply_content_crop failed ({stderr}); using the source uncropped")
+        return input_path
 
 
 def detect_shots(video_path: str) -> list[dict]:
     """
     Run PySceneDetect ContentDetector and return shot boundaries in ms.
 
-    Must be given an UNPADDED video — see transcode_for_detection. Letterboxing
+    Must be given an UNPADDED video — see transcode_to_720p. Letterboxing
     dilutes every content delta and suppresses detection entirely on portrait
     footage.
     """
@@ -380,21 +410,23 @@ def run_decompose(job_id: str) -> int:
         except (ValueError, AttributeError):
             pass
 
-        # 2. Transcode to 720p
+        # 2. Measure the bars ONCE, record them, and normalize.
+        #
+        # contentCrop is the job's single source of truth for where the picture
+        # actually is. fix.py and stitch.py read the original upload, so they
+        # need the same numbers — see apply_content_crop.
+        content_crop = detect_content_crop(raw_path)
+        if content_crop:
+            job_ref.update({"contentCrop": content_crop})
+
         norm_path = os.path.join(tmp, "normalized.mp4")
-        transcode_to_720p(raw_path, norm_path)
+        transcode_to_720p(raw_path, norm_path, crop=content_crop)
 
         # 3. Detect shots
-        # Detect on an unpadded copy. norm_path is letterboxed, and letterboxing
-        # hides cuts (see transcode_for_detection). The boundaries are
-        # timestamps, so they apply to norm_path unchanged.
-        det_path = os.path.join(tmp, "detect_source.mp4")
-        try:
-            transcode_for_detection(raw_path, det_path)
-            shots = detect_shots(det_path)
-        except Exception as exc:
-            print(f"Unpadded detection failed ({exc}); falling back to the padded copy")
-            shots = detect_shots(norm_path)
+        # Straight off norm_path. It is already the cropped, unpadded copy, so
+        # the separate detection transcode this used to need — and its fallback
+        # to a padded copy that hid cuts — are both gone.
+        shots = detect_shots(norm_path)
 
         # 4. For each shot: extract 3 keyframes (25/50/75%), upload all,
         # write Firestore doc with array + mid-frame for backward-compat.

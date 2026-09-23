@@ -10,7 +10,7 @@ from modal_app.firebase import get_db
 from modal_app.decompose import (
     download_video,
     transcode_to_720p,
-    transcode_for_detection,
+    detect_content_crop,
     detect_shots,
     extract_keyframe,
     upload_keyframe,
@@ -37,18 +37,15 @@ def run_verify(job_id: str) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         raw_path = download_video(job_id, job["outputVideoUrl"], tmp)
         norm_path = os.path.join(tmp, "normalized_output.mp4")
-        transcode_to_720p(raw_path, norm_path)
+        # Measured on the OUTPUT, not copied from the job. The output should
+        # already carry no bars; if an engine handed some back, detection still
+        # has to see past them to resolve the right shot structure.
+        transcode_to_720p(raw_path, norm_path, crop=detect_content_crop(raw_path))
 
-        # Unpadded, for the same reason as decompose: letterboxing hides cuts,
-        # and a verify pass that sees one shot where there are six scores the
-        # output against the wrong structure.
-        det_path = os.path.join(tmp, "verify_detect_source.mp4")
-        try:
-            transcode_for_detection(raw_path, det_path)
-            shots = detect_shots(det_path)
-        except Exception as exc:
-            print(f"Unpadded detection failed ({exc}); falling back to the padded copy")
-            shots = detect_shots(norm_path)
+        # Straight off norm_path, same as decompose: it is already cropped and
+        # unpadded, so there is no second transcode and no padded fallback that
+        # could score the output against the wrong shot structure.
+        shots = detect_shots(norm_path)
 
         # Upload keyframes for output shots (stored under verify_shots)
         #

@@ -8,6 +8,14 @@ Flow per error:
   5. Download Runway output, verify with Opus 4.7, re-upload to Firebase
 """
 
+# The container is 3.11 but the local interpreter is 3.9, and `str | None` in a
+# signature is evaluated at import time. decompose.py carries this guard and
+# says why: "anything that imports it locally — a test, a script — hits the
+# TypeError." This module had every such signature and no guard, so it could
+# not be imported outside Modal at all, which is why its geometry was the one
+# part of the pipeline with no offline test.
+from __future__ import annotations
+
 import base64
 import json
 import math
@@ -424,7 +432,6 @@ def extract_clip(
     start_ms: float,
     end_ms: float,
     out_path: str,
-    pad_to_frame: bool = True,
     min_dimension: int = 0,
 ) -> str:
     """
@@ -435,46 +442,47 @@ def extract_clip(
     _clip_window). The fixed clip is trimmed back to the original shot
     duration at stitch time so video sync is preserved.
 
-    `pad_to_frame` letterboxes the clip into a full TARGET_W x TARGET_H frame.
-    That is required whenever a bbox is involved, because every bbox in this
-    system is normalised against the padded frame the keyframes were cut from,
-    and unpadded video would put every red box in the wrong place.
+    Never padded. The clip keeps the source's aspect ratio, always.
 
-    It is wrong everywhere else. A portrait video padded into a 16:9 frame
-    arrives at aleph2 as a picture with two black panels in it, and aleph2
+    There used to be a `pad_to_frame` switch, on by default, because a
+    normalised bbox needs a known frame and the keyframes were cut from a
+    padded one. Both sides are unpadded now (see decompose.transcode_to_720p),
+    so the fraction is portable and the pad has no job left — while its cost
+    was documented right here: a portrait video padded into a 16:9 frame
+    "arrives at aleph2 as a picture with two black panels in it, and aleph2
     treats them as canvas: the first corrected clip generated after the
     keyframe fix came back with the bars filled in with invented houses and
-    lawn. Whole-clip regrades use no bbox, so they send the shot at its own
-    aspect ratio and there is nothing to fill. Stitch pads it back on the way
-    out, so final output geometry is unchanged either way.
+    lawn." That applied to every portrait upload, which stitch.py calls "the
+    format most of our uploads arrive in".
+
+    The parameter is gone rather than defaulted off, so the padded frame
+    cannot come back by a caller passing True.
+
+    Stitch composites whatever shape this returns into the source geometry, so
+    final output is unchanged — that path already carried every whole-clip
+    regrade.
     """
     start_s, duration_s = _clip_window(video_path, start_ms, end_ms)
 
-    if pad_to_frame:
-        vf = (
-            f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
-            f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24"
-        )
-    else:
-        # Fit inside the same bounds, keep the source aspect, force even
-        # dimensions (libx264 with yuv420p rejects odd width or height).
-        vf = (
-            f"scale=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=decrease:"
-            f"force_divisible_by=2,fps=24"
-        )
-        if min_dimension:
-            # Some engines refuse anything under a minimum short side —
-            # seedance2_5 rejects a portrait clip fitted into a 1280x720 box
-            # (404x720) as "must be at least 480p". Work out the real output
-            # size here rather than in an ffmpeg expression, so we only ever
-            # scale UP: a landscape clip already at 720 on its short side must
-            # not be dragged down to 480 to satisfy a minimum it already meets.
-            size = _fit_size(video_path, min_dimension)
-            if size is not None:
-                w, h = size
-                # setsar=1 matters: without it the display width came back one
-                # pixel under the minimum and was refused again.
-                vf = f"scale={w}:{h}:flags=lanczos,setsar=1,fps=24"
+    # Fit inside TARGET_W x TARGET_H, keep the source aspect, force even
+    # dimensions (libx264 with yuv420p rejects odd width or height).
+    vf = (
+        f"scale=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=decrease:"
+        f"force_divisible_by=2,fps=24"
+    )
+    if min_dimension:
+        # Some engines refuse anything under a minimum short side —
+        # seedance2_5 rejects a portrait clip fitted into a 1280x720 box
+        # (404x720) as "must be at least 480p". Work out the real output
+        # size here rather than in an ffmpeg expression, so we only ever
+        # scale UP: a landscape clip already at 720 on its short side must
+        # not be dragged down to 480 to satisfy a minimum it already meets.
+        size = _fit_size(video_path, min_dimension)
+        if size is not None:
+            w, h = size
+            # setsar=1 matters: without it the display width came back one
+            # pixel under the minimum and was refused again.
+            vf = f"scale={w}:{h}:flags=lanczos,setsar=1,fps=24"
 
     result = subprocess.run(
         [
@@ -771,34 +779,65 @@ def extract_clip_with_in_video_marker(
     end_ms: float,
     bboxes: list[dict] | dict,
     out_path: str,
+    min_dimension: int = 0,
 ) -> str:
     """
     Extract a clip AND burn red rectangles into every frame at each bbox.
     Accepts a single bbox dict (legacy) or a list of bboxes (e.g. multiple
     scattered bullet holes).
+
+    The clip is NOT padded, and the boxes are placed against its real size.
+
+    This used to letterbox the clip into a flat TARGET_W x TARGET_H frame
+    because a normalised bbox needs a known frame to mean anything. That frame
+    is now the source's own shape all the way through — transcode_to_720p
+    stopped padding, so the keyframe a bbox was measured on and the clip it is
+    drawn into carry the SAME aspect ratio, and the fraction is portable with
+    no transform.
+
+    Dropping the pad also removes the hazard this function's sibling documents:
+    a portrait clip letterboxed into 16:9 reaches aleph2 as a picture with two
+    black panels, which it treats as canvas and fills with invented scenery.
     """
     start_s, duration_s = _clip_window(video_path, start_ms, end_ms)
 
     if isinstance(bboxes, dict):
         bboxes = [bboxes]
 
+    # The clip's real dimensions, which is what the fractions multiply by.
+    # Falling back to TARGET_W/TARGET_H would reintroduce exactly the bug this
+    # removes, so an unreadable size is an error rather than a guess.
+    #
+    # min_dimension matters here for the same reason it does in extract_clip:
+    # seedance2_5 refuses a short side under 480, and the padded frame used to
+    # satisfy that by accident (a portrait clip padded to 1280x720 has a short
+    # side of 720). Unpadded it is 360x720, so the minimum has to be asked for
+    # explicitly. Scaling up is safe for the boxes — they are fractions of the
+    # frame, so they scale with it.
+    size = _fit_size(video_path, min_dimension)
+    if size is None:
+        raise RuntimeError(
+            "extract_clip_with_in_video_marker: could not read source "
+            f"dimensions for {video_path}; refusing to guess a marker position"
+        )
+    clip_w, clip_h = size
+
     drawbox_parts: list[str] = []
     for bbox in bboxes:
-        x_px = int(bbox["x"] * TARGET_W)
-        y_px = int(bbox["y"] * TARGET_H)
-        w_px = int(bbox["w"] * TARGET_W)
-        h_px = int(bbox["h"] * TARGET_H)
-        x_px = max(0, min(TARGET_W - 1, x_px))
-        y_px = max(0, min(TARGET_H - 1, y_px))
-        w_px = max(2, min(TARGET_W - x_px, w_px))
-        h_px = max(2, min(TARGET_H - y_px, h_px))
+        x_px = int(bbox["x"] * clip_w)
+        y_px = int(bbox["y"] * clip_h)
+        w_px = int(bbox["w"] * clip_w)
+        h_px = int(bbox["h"] * clip_h)
+        x_px = max(0, min(clip_w - 1, x_px))
+        y_px = max(0, min(clip_h - 1, y_px))
+        w_px = max(2, min(clip_w - x_px, w_px))
+        h_px = max(2, min(clip_h - y_px, h_px))
         drawbox_parts.append(
             f"drawbox=x={x_px}:y={y_px}:w={w_px}:h={h_px}:color=red@1.0:thickness=8"
         )
 
     vf = (
-        f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,"
-        f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24,"
+        f"scale={clip_w}:{clip_h}:flags=lanczos,setsar=1,fps=24,"
         + ",".join(drawbox_parts)
     )
 
@@ -1394,6 +1433,16 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
 
+            # Cut the bars off the ORIGINAL only. A prior fixed clip was made
+            # from an already-cropped source, so cropping it again would eat
+            # into the picture — the crop is applied exactly once per lineage.
+            if not prior_clip_url:
+                from modal_app.decompose import apply_content_crop
+                video_local = apply_content_crop(
+                    video_local, os.path.join(tmp, "video_cropped.mp4"),
+                    job.get("contentCrop"),
+                )
+
             # Lighting and atmosphere errors are whole-clip color transforms —
             # spatial bboxes are irrelevant and will cause Aleph to inpaint a
             # region instead of regrading the full frame. Skip all bbox logic.
@@ -1481,6 +1530,7 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                         fix_shot["endMs"],
                         target_bboxes,
                         clip_local,
+                        min_dimension=FIX_ENGINES[engine]["min_dimension"],
                     )
                     print(
                         f"Extracted clip with {len(target_bboxes)} in-video marker(s)"
@@ -1491,9 +1541,6 @@ def fix_single_error(job_id: str, error_id: str) -> None:
                         fix_shot["startMs"],
                         fix_shot["endMs"],
                         clip_local,
-                        # No bbox on this path, so nothing depends on the padded
-                        # frame — and the black bars would be outpainted.
-                        pad_to_frame=not is_wholeclip_type,
                         min_dimension=FIX_ENGINES[engine]["min_dimension"],
                     )
 

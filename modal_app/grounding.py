@@ -12,6 +12,7 @@ vs Opus's free-form bbox at ~0.2–0.3.
 import os
 import threading
 import time
+from functools import lru_cache
 
 import requests
 
@@ -25,10 +26,36 @@ import requests
 GROUNDING_CONCURRENCY = 12
 _grounding_slots = threading.Semaphore(GROUNDING_CONCURRENCY)
 
-# Keyframes are extracted at this resolution by decompose.transcode_to_720p.
-# Grounding DINO returns pixel coords; we normalize against these dimensions.
-KEYFRAME_W = 1280
-KEYFRAME_H = 720
+# Grounding DINO returns PIXEL coords, so they have to be normalised against
+# the dimensions of the image it was actually given.
+#
+# These were hardcoded to 1280x720 on the assumption that transcode_to_720p
+# padded every keyframe to exactly that. It no longer does — the normalized
+# source keeps the upload's aspect ratio and is never padded — so a portrait
+# keyframe is 360x720 and dividing its x by 1280 put every box at roughly a
+# quarter of its true horizontal position. Measure the image instead of
+# assuming it.
+#
+# Cached because the same keyframe is localized for several errors, and each
+# error localizes several frames; without it a job refetches the same handful
+# of JPEGs dozens of times.
+@lru_cache(maxsize=256)
+def _image_size(image_url: str) -> tuple[int, int] | None:
+    """(width, height) of the image at `image_url`, or None if unreadable."""
+    import cv2
+    import numpy as np
+
+    try:
+        r = requests.get(image_url, timeout=30)
+        r.raise_for_status()
+        frame = cv2.imdecode(np.frombuffer(r.content, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return None
+        h, w = frame.shape[:2]
+        return (w, h) if w > 0 and h > 0 else None
+    except Exception as exc:
+        print(f"_image_size({image_url}): {exc}")
+        return None
 
 REPLICATE_BASE = "https://api.replicate.com/v1"
 # adirik/grounding-dino is a community model — needs explicit version via
@@ -152,11 +179,19 @@ def _grounding_dino_request(
     if xmax <= xmin or ymax <= ymin:
         return None
 
+    size = _image_size(image_url)
+    if size is None:
+        # Guessing a frame size here is how a box ends up somewhere the object
+        # is not. No bbox at all is handled everywhere; a wrong one is not.
+        print(f"Grounding DINO: could not measure {image_url}; discarding bbox")
+        return None
+    img_w, img_h = size
+
     return {
-        "x": max(0.0, xmin / KEYFRAME_W),
-        "y": max(0.0, ymin / KEYFRAME_H),
-        "w": max(0.0, (xmax - xmin) / KEYFRAME_W),
-        "h": max(0.0, (ymax - ymin) / KEYFRAME_H),
+        "x": max(0.0, xmin / img_w),
+        "y": max(0.0, ymin / img_h),
+        "w": max(0.0, (xmax - xmin) / img_w),
+        "h": max(0.0, (ymax - ymin) / img_h),
         "score": _score(best),
     }
 

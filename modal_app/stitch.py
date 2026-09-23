@@ -289,6 +289,17 @@ def restitch(job_id: str) -> str:
         video_local = os.path.join(tmp, "original.mp4")
         download_file(job["inputVideoUrl"], video_local)
 
+        # Same bars, same numbers, at native resolution. Without this the
+        # untouched shots are cut from the barred original while the fixed ones
+        # come back cropped, and the picture would jump at every cut. Cropping
+        # here rather than reading the normalized copy keeps a 1920x1080 upload
+        # at 1920x1080 for the shots nothing was done to.
+        from modal_app.decompose import apply_content_crop
+        video_local = apply_content_crop(
+            video_local, os.path.join(tmp, "original_cropped.mp4"),
+            job.get("contentCrop"),
+        )
+
         segment_paths = []
 
         # Probe original to get its stream info

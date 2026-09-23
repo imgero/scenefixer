@@ -44,3 +44,6 @@ scripts/delivery-audit/corpus/
 scripts/detection-eval/frames/
 scripts/detection-eval/sheets/
 scripts/detection-eval/candidates.json
+
+# Never commit user footage — same rule as the delivery-audit rig.
+scripts/geometry-test/corpus/
