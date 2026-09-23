@@ -51,11 +51,28 @@ def run_verify(job_id: str) -> dict:
             shots = detect_shots(norm_path)
 
         # Upload keyframes for output shots (stored under verify_shots)
+        #
+        # extract_keyframe returns None and writes NO FILE when ffmpeg cannot
+        # produce a frame — the failure decompose.py already guards, for the
+        # reason its docstring gives: upload_keyframe then raises [Errno 2] on
+        # a path that was never created. Here that lands after the user has
+        # been charged and after restitch has written the output, so the outer
+        # handler in app.py marks the job "error" and download — gated on
+        # status "done" — is refused for a file that exists and is correct.
+        #
+        # Skipping the shot instead is already a supported outcome: fewer
+        # verify shots than input shots makes score_reliable False below, and
+        # scoreAfter is withheld rather than wrong.
         verify_shots = []
         for shot in shots:
             mid_ms = (shot["startMs"] + shot["endMs"]) / 2
             kf_path = os.path.join(tmp, f"vkf_{shot['index']}.jpg")
-            extract_keyframe(norm_path, mid_ms, kf_path)
+            if extract_keyframe(norm_path, mid_ms, kf_path) is None:
+                print(
+                    f"Verify: keyframe skipped — output shot {shot['index']} at "
+                    f"{mid_ms / 1000.0:.3f}s: ffmpeg produced no frame"
+                )
+                continue
             storage_path = f"jobs/{job_id}/verify_keyframes/{shot['index']}.jpg"
             keyframe_url = upload_keyframe(kf_path, storage_path)
             verify_shots.append({
