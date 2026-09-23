@@ -9,6 +9,11 @@ are trained exactly for this task. Empirically: GroundingDINO IoU is ~0.64
 vs Opus's free-form bbox at ~0.2–0.3.
 """
 
+# The container is 3.11 but the local interpreter is 3.9, and `str | None` in a
+# signature is evaluated at import time, so without this the module cannot be
+# imported by a test or a script at all. decompose.py carries the same note.
+from __future__ import annotations
+
 import os
 import threading
 import time

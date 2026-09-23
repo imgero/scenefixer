@@ -3,6 +3,11 @@ Phase 3 — Detect continuity errors between shot pairs using Claude vision API.
 Fan-out: each pair runs in parallel via Modal .map().
 """
 
+# The container is 3.11 but the local interpreter is 3.9, and `str | None` in a
+# signature is evaluated at import time, so without this the module cannot be
+# imported by a test or a script at all. decompose.py carries the same note.
+from __future__ import annotations
+
 import hashlib
 import json
 import os

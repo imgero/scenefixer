@@ -415,9 +415,13 @@ def run_decompose(job_id: str) -> int:
         # contentCrop is the job's single source of truth for where the picture
         # actually is. fix.py and stitch.py read the original upload, so they
         # need the same numbers — see apply_content_crop.
+        # Written UNCONDITIONALLY, None included. Writing it only when bars
+        # were found leaves a previous run's crop on the doc when a re-analysis
+        # finds none, and fix/stitch would then cut into a picture that has no
+        # bars. It also makes "absent" ambiguous between never-measured and
+        # measured-and-clean.
         content_crop = detect_content_crop(raw_path)
-        if content_crop:
-            job_ref.update({"contentCrop": content_crop})
+        job_ref.update({"contentCrop": content_crop})
 
         norm_path = os.path.join(tmp, "normalized.mp4")
         transcode_to_720p(raw_path, norm_path, crop=content_crop)

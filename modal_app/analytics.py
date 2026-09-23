@@ -6,6 +6,11 @@ and failure events have to be emitted from here. Everything in this module is
 best-effort: telemetry must never be able to fail a job.
 """
 
+# The container is 3.11 but the local interpreter is 3.9, and `str | None` in a
+# signature is evaluated at import time, so without this the module cannot be
+# imported by a test or a script at all. decompose.py carries the same note.
+from __future__ import annotations
+
 import os
 import time
 from datetime import datetime, timezone
