@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import re
 import math
 import subprocess
 import tempfile
@@ -59,6 +60,74 @@ def transcode_to_720p(input_path: str, output_path: str) -> str:
     return output_path
 
 
+def detect_content_crop(input_path: str) -> str | None:
+    """
+    Find bars that are black in EVERY frame, and return an ffmpeg crop for the
+    picture inside them. Returns None when the frame is already all content.
+
+    transcode_for_detection stopped us ADDING letterboxing. It cannot help when
+    the bars arrive baked into the upload's pixels, which is what a portrait
+    clip exported from a landscape NLE timeline looks like — and that export is
+    a default, not a mistake.
+
+    Measured on the upload that exposed this (`Timeline 1.mp4`, 62.5s, 1920x1080,
+    the only long-form video a real user has ever sent): the picture is 540x1080
+    at x=690, so 71.9% of every frame is black. Same ContentDetector, same
+    threshold 27.0 — 1 shot with the bars, 10 shots without them. The user was
+    told their ten-shot video was "a single continuous shot".
+
+    cropdetect accumulates the bounding box over every frame it sees rather than
+    resetting, so a single frame with content at the edge widens the box back to
+    full frame and nothing is cropped. That is the right bias: a fade to black,
+    a dark shot, or a letterbox that opens mid-clip all end up as no-ops. It
+    costs 1.3s on that 62s 1080p file, against a 22s analysis.
+
+    Keyframe-only sampling (`-skip_frame nokey`) was ~5x faster and rejected for
+    emitting NOTHING on the two shortest clips in the corpus (2.0s and 8.1s) —
+    too few keyframes to report on. Short clips are most of the corpus.
+    """
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height",
+         "-of", "csv=p=0:nk=1", input_path],
+        capture_output=True, text=True,
+    )
+    try:
+        width, height = (int(v) for v in probe.stdout.strip().split(",")[:2])
+    except (ValueError, TypeError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    result = subprocess.run(
+        ["ffmpeg", "-v", "info", "-i", input_path,
+         "-vf", "cropdetect=24:2:0", "-an", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    matches = re.findall(r"crop=(-?\d+):(-?\d+):(-?\d+):(-?\d+)", result.stderr)
+    if not matches:
+        return None
+    w, h, x, y = (int(v) for v in matches[-1])
+
+    # Everything below is a reason to leave the frame alone. Detection seeing a
+    # slightly-too-wide frame is a bad day; detection seeing a crop that ate the
+    # picture is a job that reports errors about nothing.
+    if w <= 0 or h <= 0 or x < 0 or y < 0:
+        return None
+    if x + w > width or y + h > height:
+        return None
+    if w < 120 or h < 120:
+        return None
+    # A 9:16 portrait inside 16:9 keeps ~32% of the area, and the upload above
+    # keeps 28%. Below 10% it is not a bar, it is a bug.
+    if (w * h) < 0.10 * (width * height):
+        return None
+    # Nothing worth re-encoding for: encoder edge artifacts, not letterboxing.
+    if (w * h) > 0.95 * (width * height):
+        return None
+
+    return f"crop={w}:{h}:{x}:{y}"
+
 def transcode_for_detection(input_path: str, output_path: str) -> str:
     """
     A 720p copy with NO letterboxing, used only to find shot boundaries.
@@ -77,14 +146,26 @@ def transcode_for_detection(input_path: str, output_path: str) -> str:
     cannot be done, and the verifier correctly rejected the result. A large part
     of the unfixable-error problem is this one line of ffmpeg.
 
+    Bars already baked into the upload survive that scale, so they are found and
+    cut first — see detect_content_crop.
+
     Boundaries found here are timestamps, so they apply unchanged to the padded
-    transcode that everything downstream uses.
+    transcode that everything downstream uses. The crop is confined to this copy
+    on purpose: keyframes, the fix and the delivered file keep the user's own
+    framing, bars included. We are changing what the DETECTOR sees, not what the
+    user gets.
     """
+    crop = detect_content_crop(input_path)
+    if crop:
+        print(f"Cropping baked-in bars before detection: {crop}")
+    vf = "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2"
+    if crop:
+        vf = f"{crop},{vf}"
+
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", input_path,
-            "-vf",
-            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-vf", vf,
             "-c:v", "libx264", "-crf", "23",
             "-an",
             output_path,
