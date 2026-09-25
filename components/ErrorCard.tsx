@@ -6,6 +6,7 @@ import { doc, updateDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import type { ContinuityError, BBox, FixMode } from "@/lib/types";
 import posthog from "posthog-js";
+import { HelpLink } from "@/components/HelpDialog";
 
 type Props = {
   error: ContinuityError;
@@ -406,11 +407,16 @@ export default function ErrorCard({
                       const href =
                         a.kind === "buy_credits" || a.kind === "upgrade"
                           ? "/pricing"
-                          : a.kind === "contact_support"
-                            ? "mailto:help@scenefixer.com"
-                            : null;
+                          : null;
                       const cls =
                         "px-3 py-1.5 rounded-lg border border-amber-300 bg-white hover:bg-amber-100 text-amber-900 text-xs font-medium transition-colors";
+                      if (a.kind === "contact_support") {
+                        return (
+                          <HelpLink key={a.kind} source="fix_failed_card" className={cls}>
+                            {a.label}
+                          </HelpLink>
+                        );
+                      }
                       if (href) {
                         return (
                           <a key={a.kind} href={href} className={cls}>

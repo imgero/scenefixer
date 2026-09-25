@@ -9,6 +9,7 @@ import Link from "next/link";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
 import { PLAN_LIMITS, FREE_SCANS_PER_DAY } from "@/lib/types";
+import { HelpLink } from "@/components/HelpDialog";
 
 /**
  * Credit packs are the only thing sold.
@@ -275,9 +276,9 @@ function PricingContent() {
         <div className="mt-8 text-center space-y-2">
           <p className="text-sm text-gray-500">
             Questions?{" "}
-            <a href="mailto:help@scenefixer.com" className="text-black underline underline-offset-2 hover:opacity-70">
-              help@scenefixer.com
-            </a>
+            <HelpLink source="pricing" className="text-black underline underline-offset-2 hover:opacity-70">
+              Ask us
+            </HelpLink>
           </p>
           <Link href="/" className="text-sm text-gray-500 hover:text-black transition-colors">
             ← Back to Scene Fixer

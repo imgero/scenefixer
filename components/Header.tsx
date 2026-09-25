@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/hooks/useAuth";
 import { PLAN_LIMITS, type Plan } from "@/lib/types";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
+import { HelpLink } from "@/components/HelpDialog";
 
 /**
  * Record the signed-in identity on the user document.
@@ -170,13 +171,13 @@ export default function Header() {
                       >
                         My fixed videos
                       </Link>
-                      <a
-                        href="mailto:help@scenefixer.com"
-                        className="flex items-center px-3.5 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+                      <HelpLink
+                        source="header_menu"
+                        className="w-full flex items-center px-3.5 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
                         onClick={() => setDropdownOpen(false)}
                       >
                         Help
-                      </a>
+                      </HelpLink>
                       <button
                         onClick={handleSignOut}
                         className="w-full flex items-center px-3.5 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"

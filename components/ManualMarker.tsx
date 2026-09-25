@@ -118,6 +118,18 @@ export default function ManualMarker({
       (mode === "replace" && replaceWith.trim().length > 0)) &&
     !submitting;
 
+  // A disabled button with no reason reads as broken. Name the first missing
+  // step, in the order the modal asks for them.
+  const missingStep = !picked
+    ? "Pick a frame on the left."
+    : bboxes.length === 0
+      ? "Drag on the frame to draw a box around the error."
+      : !adjusting && description.trim().length === 0
+        ? "Describe what it is."
+        : !adjusting && mode === "replace" && replaceWith.trim().length === 0
+          ? "Say what to replace it with."
+          : null;
+
   const submit = async () => {
     if (!picked || bboxes.length === 0) return;
     setSubmitting(true);
@@ -394,33 +406,6 @@ export default function ManualMarker({
                     )}
                   </div>
 
-                  {error && (
-                    <p className="text-xs text-red-600">{error}</p>
-                  )}
-
-                  <div className="flex justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="px-4 py-1.5 rounded-lg text-gray-700 hover:text-black text-sm"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={submit}
-                      disabled={!canSubmit}
-                      className="px-4 py-1.5 rounded-lg bg-black hover:bg-gray-800 text-white text-sm font-medium disabled:opacity-40"
-                    >
-                      {submitting
-                        ? adjusting
-                          ? "Saving…"
-                          : "Creating…"
-                        : adjusting
-                          ? "Save new location"
-                          : "Mark error"}
-                    </button>
-                  </div>
                 </div>
               </>
             ) : (
@@ -429,6 +414,41 @@ export default function ManualMarker({
               </div>
             )}
           </div>
+        </div>
+
+        {/* Outside the scrolling area on purpose. Inside it, a 1272x554
+            viewport (a 1280x720 laptop screen) put "Mark error" ~80px below
+            the modal's visible edge — a paying user filled in everything,
+            never saw the button, and closed the modal twice. */}
+        <div className="flex items-center justify-end gap-3 px-6 py-3 border-t border-gray-200">
+          {error ? (
+            <p className="mr-auto text-xs text-red-600">{error}</p>
+          ) : (
+            missingStep && (
+              <p className="mr-auto text-xs text-gray-500">{missingStep}</p>
+            )
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-lg text-gray-700 hover:text-black text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!canSubmit}
+            className="px-4 py-1.5 rounded-lg bg-black hover:bg-gray-800 text-white text-sm font-medium disabled:opacity-40"
+          >
+            {submitting
+              ? adjusting
+                ? "Saving…"
+                : "Creating…"
+              : adjusting
+                ? "Save new location"
+                : "Mark error"}
+          </button>
         </div>
       </div>
     </div>

@@ -15,6 +15,7 @@ import {
   Trophy,
   X,
 } from "@phosphor-icons/react";
+import { HelpLink } from "@/components/HelpDialog";
 
 const DETECTION_CATEGORIES = [
   {
@@ -164,9 +165,9 @@ export default function HomePage() {
           </div>
           <p className="mt-3 text-xs text-gray-400">
             This is a beta — detection and fixes may not always be perfect.{" "}
-            <a href="mailto:help@scenefixer.com" className="underline underline-offset-2 hover:text-black transition-colors">
-              Email us
-            </a>{" "}
+            <HelpLink source="home_beta" className="underline underline-offset-2 hover:text-black transition-colors">
+              Tell us
+            </HelpLink>{" "}
             if something looks off.
           </p>
         </div>
@@ -342,7 +343,7 @@ export default function HomePage() {
           </div>
           <div className="flex items-center gap-6 text-xs text-gray-400">
             <Link href="/pricing" className="hover:text-black transition-colors">Pricing</Link>
-            <a href="mailto:help@scenefixer.com" className="hover:text-black transition-colors">Support</a>
+            <HelpLink source="footer" className="hover:text-black transition-colors">Support</HelpLink>
             <Link href="/legal/terms" className="hover:text-black transition-colors">Terms</Link>
             <Link href="/legal/privacy" className="hover:text-black transition-colors">Privacy</Link>
             <Link href="/legal/refunds" className="hover:text-black transition-colors">Refunds</Link>

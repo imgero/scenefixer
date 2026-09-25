@@ -7,6 +7,7 @@ import { auth } from "@/lib/firebase";
 import { useAuth } from "@/lib/hooks/useAuth";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
+import { HelpLink } from "@/components/HelpDialog";
 
 const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 const ACCEPTED = ["video/mp4", "video/quicktime"];
@@ -417,9 +418,9 @@ export default function DropZone() {
 
       <p className="text-center text-[11px] text-gray-400">
         Beta — results may vary.{" "}
-        <a href="mailto:help@scenefixer.com" className="underline underline-offset-2 hover:text-gray-600 transition-colors">
+        <HelpLink source="dropzone" className="underline underline-offset-2 hover:text-gray-600 transition-colors">
           Let us know
-        </a>{" "}
+        </HelpLink>{" "}
         if something looks wrong.
       </p>
     </div>

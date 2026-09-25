@@ -17,6 +17,7 @@ import ManualMarker from "@/components/ManualMarker";
 import type { Shot, RecentJob, ContinuityError, Job } from "@/lib/types";
 import Link from "next/link";
 import posthog from "posthog-js";
+import { HelpLink } from "@/components/HelpDialog";
 
 type Props = {
   params: Promise<{ id: string }>;
@@ -430,12 +431,12 @@ export default function JobPage({ params }: Props) {
         <p className="text-xs text-amber-800">
           <span className="font-semibold">Beta</span> — detection and fixes may not always be perfect.
         </p>
-        <a
-          href="mailto:help@scenefixer.com"
+        <HelpLink
+          source="job_beta_notice"
           className="text-xs text-amber-800 font-semibold underline underline-offset-2 hover:opacity-70 whitespace-nowrap shrink-0"
         >
-          Email us →
-        </a>
+          Tell us →
+        </HelpLink>
       </div>
 
       {/* Pipeline status */}
