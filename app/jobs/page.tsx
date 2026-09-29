@@ -6,6 +6,7 @@ import { collection, query, where, orderBy, limit, onSnapshot } from "firebase/f
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/hooks/useAuth";
 import type { Job } from "@/lib/types";
+import { isAbandonedUpload } from "@/lib/uploads";
 import { FilmSlate, ArrowRight, CheckCircle, Clock, Warning } from "@phosphor-icons/react";
 
 const STATUS_META: Record<string, { label: string; color: string }> = {
@@ -35,7 +36,13 @@ export default function JobsPage() {
     );
 
     const unsub = onSnapshot(q, (snap) => {
-      setJobs(snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Job));
+      setJobs(
+        snap.docs
+          .map((d) => ({ id: d.id, ...d.data() }) as Job)
+          // An upload whose URL has expired will never arrive; listing it as
+          // "Uploading" forever is a job the user never really had.
+          .filter((job) => !isAbandonedUpload(job))
+      );
       setJobsLoading(false);
     }, () => {
       setJobsLoading(false);

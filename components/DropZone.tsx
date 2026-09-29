@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/hooks/useAuth";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
 import { HelpLink } from "@/components/HelpDialog";
+import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
 
 const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 const ACCEPTED = ["video/mp4", "video/quicktime"];
@@ -42,6 +43,15 @@ export default function DropZone() {
   const [hint, setHint] = useState("");
   const [signingIn, setSigningIn] = useState(false);
   const [betaMode, setBetaMode] = useState(false);
+  // The job a failed attempt created, kept so a retry of the same file
+  // uploads into it instead of abandoning it. See handleFile.
+  const pendingUpload = useRef<{
+    fileKey: string;
+    jobId: string;
+    uploadUrl: string;
+    storagePath: string;
+    issuedAt: number;
+  } | null>(null);
 
   useEffect(() => {
     setBetaMode(localStorage.getItem("sf_beta_mode") === "1");
@@ -97,30 +107,63 @@ export default function DropZone() {
         if (token) headers["Authorization"] = `Bearer ${token}`;
         else if (betaId) headers["X-Beta-Token"] = betaId;
 
-        // 1. Create job + get signed upload URL
-        const res = await fetch("/api/jobs", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            filename: file.name,
-            contentType: file.type,
-            userHint: trimmedHint || undefined,
-          }),
-        });
+        // 1. Create job + get signed upload URL — or, when this is a retry of
+        // the same file, reuse the job the failed attempt already created.
+        //
+        // Every retry used to create a fresh job and abandon the last one in
+        // "uploading" for good: 31 of the 38 stuck jobs by 29 Sep were followed
+        // by the same person trying again. A beta tester's one slot is claimed
+        // when the job is created, so a retry after a dropped connection was
+        // refused with "This beta slot has already been used".
+        const fileKey = [file.name, file.size, file.lastModified, file.type, trimmedHint].join("|");
+        const pending = pendingUpload.current;
+        let jobId: string, uploadUrl: string, storagePath: string;
+        if (
+          pending &&
+          pending.fileKey === fileKey &&
+          // Leave the URL a margin to finish a large upload before it expires.
+          Date.now() - pending.issuedAt < UPLOAD_URL_TTL_MS - 10 * 60 * 1000
+        ) {
+          ({ jobId, uploadUrl, storagePath } = pending);
+        } else {
+          const res = await fetch("/api/jobs", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              filename: file.name,
+              contentType: file.type,
+              userHint: trimmedHint || undefined,
+            }),
+          }).catch((err) => {
+            // The request can land and create the job while the response is
+            // lost — on 27 Sep a phone left a job with no upload attempt at
+            // all, then created a second one 16 s later. Nothing recorded it.
+            posthog.capture("job_create_failed", { reason: "network", is_beta: !!betaId });
+            throw err;
+          });
 
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          if (data.code === "pool_exhausted") {
-            setError("The beta pool is full. Sign up for free to continue!");
-          } else if (data.code === "already_used") {
-            setError("This beta slot has already been used. Sign up for free — it's quick!");
-          } else {
-            setError("Upload failed. Please try again.");
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            posthog.capture("job_create_failed", {
+              http_status: res.status,
+              code: data.code ?? null,
+              is_beta: !!betaId,
+            });
+            if (data.code === "pool_exhausted") {
+              setError("The beta pool is full. Sign up for free to continue!");
+            } else if (data.code === "already_used") {
+              setError("This beta slot has already been used. Sign up for free — it's quick!");
+            } else {
+              setError("Upload failed. Please try again.");
+            }
+            setProgress(null);
+            setStage("");
+            return;
           }
-          return;
-        }
 
-        const { jobId, uploadUrl, storagePath } = await res.json();
+          ({ jobId, uploadUrl, storagePath } = await res.json());
+          pendingUpload.current = { fileKey, jobId, uploadUrl, storagePath, issuedAt: Date.now() };
+        }
 
         // 2. PUT directly to the signed URL.
         //
@@ -228,6 +271,8 @@ export default function DropZone() {
           });
           throw new Error(startData.error ?? "Failed to start pipeline");
         }
+
+        pendingUpload.current = null;
 
         // 4. Save to recent jobs in localStorage
         if (betaId) localStorage.setItem("sf_beta_job", jobId);

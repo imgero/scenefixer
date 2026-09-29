@@ -18,6 +18,7 @@ import type { Shot, RecentJob, ContinuityError, Job } from "@/lib/types";
 import Link from "next/link";
 import posthog from "posthog-js";
 import { HelpLink } from "@/components/HelpDialog";
+import { isAbandonedUpload } from "@/lib/uploads";
 
 type Props = {
   params: Promise<{ id: string }>;
@@ -439,8 +440,23 @@ export default function JobPage({ params }: Props) {
         </HelpLink>
       </div>
 
+      {isAbandonedUpload(job) && (
+        <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-4">
+          <p className="text-sm text-black font-semibold mb-1">This upload didn&apos;t finish</p>
+          <p className="text-xs text-gray-600 mb-3">
+            The video never reached us, so nothing was analysed and nothing was charged.
+          </p>
+          <Link
+            href="/"
+            className="inline-block text-xs font-semibold text-black underline underline-offset-2 hover:opacity-70"
+          >
+            Upload it again →
+          </Link>
+        </div>
+      )}
+
       {/* Pipeline status */}
-      <div className="mb-6">
+      <div className={isAbandonedUpload(job) ? "hidden" : "mb-6"}>
         <JobStatus
           status={job.status}
           shotCount={job.shotCount || undefined}

@@ -5,6 +5,7 @@ import { createId } from "@paralleldrive/cuid2";
 import { FieldValue } from "firebase-admin/firestore";
 import { captureServer } from "@/lib/posthog-server";
 import { notifyOwner } from "@/lib/notify";
+import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
 
 const BETA_MAX_CREDITS = 200;
 
@@ -71,7 +72,7 @@ export async function POST(req: NextRequest) {
     const [uploadUrl] = await file.getSignedUrl({
       version: "v4",
       action: "write",
-      expires: Date.now() + 60 * 60 * 1000,
+      expires: Date.now() + UPLOAD_URL_TTL_MS,
       contentType,
     });
 
