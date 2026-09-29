@@ -19,9 +19,6 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scenedetect import open_video, SceneManager
-from scenedetect.detectors import ContentDetector
-
 from modal_app.firebase import get_db, get_bucket
 
 
@@ -206,40 +203,233 @@ def apply_content_crop(input_path: str, output_path: str, crop: str | None) -> s
         return input_path
 
 
+# Shot boundaries come from TransNetV2, a network trained on hard cuts AND
+# gradual transitions. It replaced PySceneDetect's ContentDetector at 27.0 on
+# 2026-09-29, after three real users in a row were failed by the old detector:
+# letterbox bars hid 9 cuts (09-23), a dark low-contrast cut scored 25.6 (09-25),
+# and a tribute film joined by cross-dissolves became one 33 s "shot" (09-29).
+# A pixel-difference threshold cannot see a dissolve at all — the change is
+# spread over ~15 frames and no single frame crosses the line.
+#
+# Measured on 84 real uploads, hand-labelled at every point either detector
+# fired (scratch eval, 2026-09-29):
+#
+#                          hard cuts   dissolves   false cuts
+#   ContentDetector 27.0    257/303       4/35       30/229
+#   TransNetV2 0.5          286/303      17/35        0/229
+#   TransNetV2 0.3          295/303      22/35        7/229
+#
+# 0.3 finds more of both kinds than production did AND fires a quarter as many
+# false cuts. A false cut is the expensive mistake — it becomes a pair that can
+# produce a REPAIRABLE false error a user pays for — so lower thresholds, which
+# buy a few more dissolves at 14-55 false cuts, were rejected.
+_TRANSNET_THRESHOLD = 0.3
+
+# Peaks between this and _TRANSNET_THRESHOLD are too weak to cut on, but they
+# are recorded per shot as softCutsMs. detect.py uses them as corroboration:
+# when Opus says a shot changes location partway through AND the network saw a
+# weak transition inside it, the likelier story is a missed dissolve, not a
+# defect in the user's film.
+_SOFT_CUT_THRESHOLD = 0.1
+
+# Same floor ContentDetector's min_scene_len of 15 frames gave at 30 fps. A
+# boundary closer than this to another, or to either end, is a flash or a
+# one-frame thumbnail, not a shot anyone can review.
+_MIN_SHOT_S = 0.5
+
+# Frames per inference call. The whole video in one call builds a padded copy
+# of every frame; at a studio plan's 3600 s that is ~1 GB of tensors.
+_TRANSNET_CHUNK = 4000
+_TRANSNET_OVERLAP = 50  # the network looks 25 frames each way
+
+_transnet_model = None
+
+
+def _transnet():
+    """
+    Load TransNetV2 once per container.
+
+    The package seeds Python's, numpy's and torch's global RNGs in its
+    constructor. Nothing here should inherit random.seed(42) from a model
+    load, so the Python and numpy states are put back afterwards.
+    """
+    global _transnet_model
+    if _transnet_model is None:
+        import random
+        import numpy as np
+        from transnetv2_pytorch import TransNetV2
+
+        py_state, np_state = random.getstate(), np.random.get_state()
+        try:
+            _transnet_model = TransNetV2(device="cpu")
+            _transnet_model.eval()
+        finally:
+            random.setstate(py_state)
+            np.random.set_state(np_state)
+    return _transnet_model
+
+
+def _frame_times(video_path: str) -> list[float]:
+    """
+    Presentation time of every video frame, in display order.
+
+    Frame index / average fps is wrong on variable-frame-rate video: on one
+    upload (nominal 60 fps, 36 average) ContentDetector's boundaries drifted up
+    to 0.73 s from the real cut, far enough for a keyframe to land in the
+    neighbouring shot. Packet timestamps need no decode and are exact.
+    """
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0", video_path],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    times = []
+    for line in out.split():
+        line = line.strip().strip(",")
+        try:
+            times.append(float(line))
+        except ValueError:
+            continue
+    return sorted(times)
+
+
+def _duration_ms(video_path: str) -> int:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True,
+    )
+    return int(float(result.stdout.strip()) * 1000)
+
+
+def _transition_scores(video_path: str):
+    """Per-frame transition probability from TransNetV2, one per decoded frame."""
+    import numpy as np
+    import torch
+
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", video_path,
+         "-vf", "scale=48:27", "-fps_mode", "passthrough",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:"],
+        capture_output=True, check=True,
+    ).stdout
+    frames = np.frombuffer(raw, np.uint8).reshape(-1, 27, 48, 3)
+    n = len(frames)
+    scores = np.zeros(n, dtype=np.float32)
+    if n == 0:
+        return scores
+
+    model = _transnet()
+    start = 0
+    while start < n:
+        end = min(n, start + _TRANSNET_CHUNK)
+        s0, e0 = max(0, start - _TRANSNET_OVERLAP), min(n, end + _TRANSNET_OVERLAP)
+        with torch.no_grad():
+            single, _ = model.predict_frames(
+                torch.from_numpy(frames[s0:e0].copy()), quiet=True,
+            )
+        single = single.cpu().numpy().ravel()
+        scores[start:end] = single[start - s0:start - s0 + (end - start)]
+        start = end
+    return scores
+
+
+def _peaks(scores, lo: float, hi: float, times: list[float]) -> list[int]:
+    """Local maxima in [lo, hi), strongest first, no two within _MIN_SHOT_S."""
+    idx = [
+        i for i in range(len(scores))
+        if lo <= scores[i] < hi
+        and (i == 0 or scores[i] >= scores[i - 1])
+        and (i == len(scores) - 1 or scores[i] >= scores[i + 1])
+    ]
+    idx.sort(key=lambda i: -scores[i])
+    kept: list[int] = []
+    for i in idx:
+        if all(abs(times[i] - times[k]) > _MIN_SHOT_S for k in kept):
+            kept.append(i)
+    return sorted(kept)
+
+
 def detect_shots(video_path: str) -> list[dict]:
     """
-    Run PySceneDetect ContentDetector and return shot boundaries in ms.
+    Return shot boundaries in ms, plus each shot's weak in-shot transitions.
 
-    Must be given an UNPADDED video — see transcode_to_720p. Letterboxing
-    dilutes every content delta and suppresses detection entirely on portrait
-    footage.
+    Must be given an UNPADDED video — see transcode_to_720p. Bars dilute every
+    frame the detector sees.
+
+    A peak at frame i marks i as the LAST frame of the old shot, so the new
+    shot starts at frame i+1's timestamp.
     """
-    video = open_video(video_path)
-    manager = SceneManager()
-    manager.add_detector(ContentDetector(threshold=27.0))
-    manager.detect_scenes(video)
+    duration_ms = _duration_ms(video_path)
+    scores = _transition_scores(video_path)
+    times = _frame_times(video_path)
+    if len(times) != len(scores) and len(scores):
+        # Should not happen on an mp4 we just wrote. If it does, even spacing
+        # over the real duration is the old behaviour's accuracy, not worse.
+        print(f"detect_shots: {len(times)} timestamps for {len(scores)} frames; spacing evenly")
+        times = [i * duration_ms / 1000.0 / len(scores) for i in range(len(scores))]
 
-    scene_list = manager.get_scene_list()
+    end_s = duration_ms / 1000.0
+    cut_s: list[float] = []
+    for i in _peaks(scores, _TRANSNET_THRESHOLD, 2.0, times):
+        t = times[i + 1] if i + 1 < len(times) else end_s
+        if t < _MIN_SHOT_S or end_s - t < _MIN_SHOT_S:
+            continue
+        if cut_s and t - cut_s[-1] < _MIN_SHOT_S:
+            continue
+        cut_s.append(t)
+    soft_s = [
+        times[i + 1] if i + 1 < len(times) else end_s
+        for i in _peaks(scores, _SOFT_CUT_THRESHOLD, _TRANSNET_THRESHOLD, times)
+    ]
+
+    bounds = [0.0] + cut_s + [end_s]
     shots = []
-    for i, (start, end) in enumerate(scene_list):
+    for i, (a, b) in enumerate(zip(bounds, bounds[1:])):
         shots.append({
             "index": i,
-            "startMs": int(start.get_seconds() * 1000),
-            "endMs": int(end.get_seconds() * 1000),
+            "startMs": int(a * 1000),
+            "endMs": int(b * 1000),
+            "softCutsMs": [
+                int(t * 1000) for t in soft_s
+                if a + _MIN_SHOT_S / 2 < t < b - _MIN_SHOT_S / 2
+            ],
         })
-
-    # If no scene changes detected, treat the whole video as one shot
-    if not shots:
-        import subprocess as sp
-        result = sp.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True,
-        )
-        duration_ms = int(float(result.stdout.strip()) * 1000)
-        shots = [{"index": 0, "startMs": 0, "endMs": duration_ms}]
-
+    print(
+        f"detect_shots: {len(shots)} shots, "
+        f"{sum(len(s['softCutsMs']) for s in shots)} weak in-shot transitions"
+    )
     return shots
+
+
+# A shot is blank when every keyframe's 99th-percentile luma is at or below
+# this. Measured on 431 shots from real uploads: fades to black and black
+# intros with a small watermark top out at 20; the darkest real footage (a
+# night scene, a dim interior) starts at 51.
+_BLANK_P99_LUMA = 32
+
+
+def is_blank_shot(keyframe_paths: list[str]) -> bool:
+    """
+    True when a shot has no picture — a fade to black, a black leader.
+
+    Such a shot is a transition, not footage. Compared against its neighbour
+    it reads as "failed footage": the 09-29 tribute film ended on a deliberate
+    fade to black and was told, at high severity, that shot 3 "contains no
+    image at all".
+    """
+    import cv2
+    import numpy as np
+
+    seen = False
+    for path in keyframe_paths:
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        seen = True
+        if np.percentile(img, 99) > _BLANK_P99_LUMA:
+            return False
+    return seen
 
 
 def extract_keyframe(video_path: str, mid_ms: float, output_path: str) -> str | None:
@@ -441,6 +631,7 @@ def run_decompose(job_id: str) -> int:
         for shot in shots:
             shot_dur_ms = shot["endMs"] - shot["startMs"]
             keyframe_urls: list[str] = []
+            keyframe_paths: list[str] = []
 
             for k, offset in enumerate(KEYFRAME_OFFSETS):
                 frame_ms = shot["startMs"] + shot_dur_ms * offset
@@ -457,6 +648,7 @@ def run_decompose(job_id: str) -> int:
                     continue
                 storage_path = f"jobs/{job_id}/keyframes/{shot['index']}_{k}.jpg"
                 keyframe_urls.append(upload_keyframe(kf_path, storage_path))
+                keyframe_paths.append(kf_path)
 
             if not keyframe_urls:
                 print(
@@ -473,6 +665,8 @@ def run_decompose(job_id: str) -> int:
                 "endMs": shot["endMs"],
                 "keyframeUrl": keyframe_urls[len(keyframe_urls) // 2],
                 "keyframeUrls": keyframe_urls,
+                "softCutsMs": shot.get("softCutsMs", []),
+                "isBlank": is_blank_shot(keyframe_paths),
             })
             shots_written += 1
 

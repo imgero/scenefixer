@@ -16,9 +16,14 @@ app = modal.App("scenefixer")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "fonts-liberation")
+    # CPU-only torch for TransNetV2 shot detection (decompose.detect_shots).
+    # Installed on its own step from PyTorch's CPU index: the default PyPI
+    # wheel bundles CUDA, several GB for a container with no GPU. It has to
+    # land before transnetv2-pytorch so pip sees torch as already satisfied.
+    .pip_install("torch==2.14.0", index_url="https://download.pytorch.org/whl/cpu")
     .pip_install(
+        "transnetv2-pytorch==1.0.5",  # ships its own weights; see decompose.py
         "firebase-admin==6.5.0",
-        "scenedetect[opencv]>=0.6.4",
         "anthropic>=0.52.0",
         "runwayml>=4.14.0",
         "requests>=2.31.0",

@@ -21,7 +21,10 @@ from modal_app.firebase import get_db
 from modal_app.prompts import build_detection_prompt, build_standalone_prompt, build_holistic_prompt
 
 
-PROMPT_VERSION = "v17"  # bumped: different_scene no longer discards object-level findings
+# v18: shot boundaries now come from TransNetV2. Keyframe URLs are
+# jobs/{id}/keyframes/{shot}_{k}.jpg, so a re-analysed job reuses the same URL
+# strings for DIFFERENT frames, and v17 entries would answer for the old shots.
+PROMPT_VERSION = "v18"
 HOLISTIC_VERSION = "v1"  # separate version for holistic scene analysis
 WINDOW_SECONDS = 60  # sliding window for same-scene detection
 SMALL_VIDEO_THRESHOLD = 10  # ≤ this many shots → compare every pair
@@ -881,6 +884,16 @@ def run_detect(job_id: str) -> int:
             print(f"analysis_failed notify failed: {exc}")
         return 0
 
+    # A blank shot (a fade to black, a black leader) is a transition, not
+    # footage, and is never compared — see decompose.is_blank_shot. Everything
+    # from here down works on the shots that have a picture, including the
+    # score's per-shot density.
+    shots_with_keyframes = len(shots)
+    blank = [s["id"] for s in shots if s.get("isBlank")]
+    if blank:
+        print(f"Detection: {len(blank)} blank shot(s) left out: {blank}")
+        shots = [s for s in shots if not s.get("isBlank")]
+
     # 1. Collect all errors — both standalone (per-shot) and pair-wise (cross-shot).
     raw: list[tuple[dict, dict, dict]] = []  # (shot_a, shot_b, err)
 
@@ -916,6 +929,7 @@ def run_detect(job_id: str) -> int:
 
     shot_index = {shot["id"]: i for i, shot in enumerate(shots)}
     dropped_far = 0
+    dropped_missed_cut = 0
 
     for _, sa, sb, errs in results:
         ia = shot_index.get(sa["id"], 0)
@@ -927,12 +941,29 @@ def run_detect(job_id: str) -> int:
                 # GRADE_TYPES.
                 dropped_far += 1
                 continue
+            if sa.get("softCutsMs") and _is_within_shot_environment_drift(err, sa, sb):
+                # Opus says this shot changes location partway through, and
+                # the shot detector saw a weak transition inside it. Two
+                # independent signals agreeing is a missed cut — most often a
+                # dissolve — not a defect in the user's film. Unguarded, this
+                # is what told the 09-25 and 09-29 users that their videos had
+                # a "high" problem we could not fix.
+                #
+                # Without the corroborating peak the finding stays, as an
+                # unrepairable error: it may be genuine generative morphing.
+                dropped_missed_cut += 1
+                continue
             raw.append((sa, sb, err))
 
     if dropped_far:
         print(
             f"Detection: dropped {dropped_far} grade/style errors "
             f"between non-adjacent shots"
+        )
+    if dropped_missed_cut:
+        print(
+            f"Detection: dropped {dropped_missed_cut} within-shot scene-change "
+            f"finding(s) on shots with a weak transition inside them"
         )
 
     # Holistic — catches outlier shots that pair-wise misses (e.g. one rogue
@@ -1065,7 +1096,10 @@ def run_detect(job_id: str) -> int:
             # silently indistinguishable from a clean full one.
             "shot_count": job_doc.get("shotCount", len(shots)),
             "shots_analyzed": len(shots),
-            "partially_analysed": job_doc.get("shotCount", len(shots)) > len(shots),
+            # Against shots that have keyframes, not shots compared: a blank
+            # shot left out on purpose is not a partial analysis.
+            "partially_analysed": job_doc.get("shotCount", shots_with_keyframes) > shots_with_keyframes,
+            "blank_shots": len(blank),
             "error_count": total_errors,
             "score_before": score,
             "pair_count": len(get_pairs_to_compare(shots)) if len(shots) >= 2 else 0,
