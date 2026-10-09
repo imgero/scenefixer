@@ -25,10 +25,10 @@ export const STRIPE_PRICES: Record<string, { monthly: string; annual: string }> 
 // One-time credit packs: 1 credit = 1 second of Runway output fixed.
 // Create each as a one-time Stripe product and paste the price_xxx IDs below.
 export const CREDIT_PACKS: { pack: string; credits: number; price: number; label: string; priceId: string }[] = [
-  { pack: "10",  credits: 18,  price: 10,  label: "",           priceId: process.env.STRIPE_PRICE_CREDIT_10  ?? "" },
-  { pack: "25",  credits: 50,  price: 25,  label: "save ~10%",  priceId: process.env.STRIPE_PRICE_CREDIT_25  ?? "" },
-  { pack: "50",  credits: 110, price: 50,  label: "save ~15%",  priceId: process.env.STRIPE_PRICE_CREDIT_50  ?? "" },
-  { pack: "100", credits: 240, price: 100, label: "save ~20%",  priceId: process.env.STRIPE_PRICE_CREDIT_100 ?? "" },
+  { pack: "10",  credits: 15,  price: 10,  label: "",           priceId: process.env.STRIPE_PRICE_CREDIT_10  ?? "" },
+  { pack: "25",  credits: 40,  price: 25,  label: "save ~6%",   priceId: process.env.STRIPE_PRICE_CREDIT_25  ?? "" },
+  { pack: "50",  credits: 85,  price: 50,  label: "save ~12%",  priceId: process.env.STRIPE_PRICE_CREDIT_50  ?? "" },
+  { pack: "100", credits: 190, price: 100, label: "save ~21%",  priceId: process.env.STRIPE_PRICE_CREDIT_100 ?? "" },
 ];
 
 /**

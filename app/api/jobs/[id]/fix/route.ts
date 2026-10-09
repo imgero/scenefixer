@@ -2,7 +2,7 @@ import { after } from "next/server";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb, adminAuth } from "@/lib/firebase-admin";
 import { triggerFixPhase } from "@/lib/modal";
-import { PLAN_LIMITS } from "@/lib/types";
+import { PLAN_LIMITS, PAY_PER_FIX_OUTPUT } from "@/lib/types";
 import { ensureEntitlement, MONTHLY_SPEND_CEILING } from "@/lib/entitlements";
 import { captureServer } from "@/lib/posthog-server";
 
@@ -85,7 +85,7 @@ export async function POST(
   const betaToken = req.headers.get("X-Beta-Token");
 
   if (betaToken && !req.headers.get("Authorization")) {
-    return handleBetaFix(req, jobId, betaToken);
+    return handleBetaFix(jobId, betaToken);
   }
 
   const uid = await getUidFromRequest(req);
@@ -287,6 +287,12 @@ export async function POST(
       );
     }
 
+    // A free-plan account fixing with purchased credits paid for this output,
+    // so it gets the pay-per-fix quality rather than the free plan's
+    // 480p + watermark. Legacy subscribers keep their plan's output.
+    const output =
+      plan === "free" && fromBalance > 0 ? PAY_PER_FIX_OUTPUT : PLAN_LIMITS[plan];
+
     // Deduct credits
     const newUsedThisMonth = (monthResetAt < monthStart ? 0 : creditsUsedThisMonth) + fromMonthly;
     await userRef.set(
@@ -315,8 +321,8 @@ export async function POST(
       status: "fixing",
       fixingStartedAt: Date.now(),
       ownerUid: uid,
-      outputQuality: PLAN_LIMITS[plan].qualityLabel,
-      watermark: PLAN_LIMITS[plan].watermark,
+      outputQuality: output.qualityLabel,
+      watermark: output.watermark,
     });
 
     await captureServer({
@@ -374,7 +380,7 @@ export async function POST(
   }
 }
 
-async function handleBetaFix(req: NextRequest, jobId: string, betaToken: string) {
+async function handleBetaFix(jobId: string, betaToken: string) {
   const distinctId = `beta_${betaToken.slice(0, 8)}`;
 
   await captureServer({
@@ -383,96 +389,19 @@ async function handleBetaFix(req: NextRequest, jobId: string, betaToken: string)
     properties: { job_id: jobId, authenticated: false, is_beta: true },
   });
 
-  const rejectBeta = async (
-    reason: string,
-    status: number,
-    body: Record<string, unknown>,
-    extra: Record<string, unknown> = {}
-  ) => {
-    await captureServer({
-      distinctId,
-      event: "fix_rejected",
-      properties: { job_id: jobId, reason, http_status: status, is_beta: true, ...extra },
-    });
-    return NextResponse.json(body, { status });
-  };
-
-  try {
-    const jobSnap = await adminDb.collection("jobs").doc(jobId).get();
-    if (!jobSnap.exists) return rejectBeta("job_not_found", 404, { error: "Job not found" });
-
-    const jobData = jobSnap.data()!;
-    if (jobData.betaToken !== betaToken) {
-      return rejectBeta("unauthorized", 403, { error: "Unauthorized" });
-    }
-
-    const status = jobData.status;
-    if (status !== "awaiting_confirmation" && status !== "error" && status !== "done") {
-      return rejectBeta(
-        "not_fixable_state",
-        409,
-        { error: "Job is not in a fixable state" },
-        { status: status ?? null }
-      );
-    }
-
-    const useSnap = await adminDb.collection("betaUses").doc(betaToken).get();
-    if (!useSnap.exists) {
-      return rejectBeta("invalid_beta_token", 403, {
-        error: "Beta token not registered",
-        code: "invalid_beta",
-      });
-    }
-
-    if (useSnap.data()?.fixedAt) {
-      return rejectBeta("beta_already_used", 402, {
-        error: "Your beta test has already been used.",
-        code: "beta_used",
-      });
-    }
-
-    await adminDb.collection("betaUses").doc(betaToken).update({ fixedAt: Date.now() });
-
-    await adminDb.collection("jobs").doc(jobId).update({
-      status: "fixing",
-      fixingStartedAt: Date.now(),
-      outputQuality: "720p",
-      watermark: false,
-    });
-
-    await captureServer({
-      distinctId,
-      event: "fix_started",
-      properties: { job_id: jobId, plan: "beta" },
-    });
-
-    after(async () => {
-      try {
-        await triggerFixPhase(jobId);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`Modal beta fix trigger failed for job ${jobId}: ${msg}`);
-        await captureServer({
-          distinctId,
-          event: "fix_trigger_failed",
-          properties: { job_id: jobId, error_message: msg, is_beta: true },
-        });
-        const snap = await adminDb.collection("jobs").doc(jobId).get();
-        if (snap.exists && snap.data()?.status !== "done") {
-          await adminDb.collection("jobs").doc(jobId).update({ status: "error", errorMessage: msg });
-        }
-      }
-    });
-
-    return NextResponse.json({ ok: true, beta: true });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`Beta fix error for job ${jobId}:`, err);
-    await captureServer({
-      distinctId,
-      event: "fix_failed",
-      properties: { job_id: jobId, error_message: msg, is_beta: true },
-    });
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
-  }
+  // Beta testers can scan without an account, but fixing is paid now, and
+  // paying needs an account to hold the credits. The free beta fix was the
+  // last way to fix without credits.
+  await captureServer({
+    distinctId,
+    event: "fix_rejected",
+    properties: { job_id: jobId, reason: "beta_fix_disabled", http_status: 402, is_beta: true },
+  });
+  return NextResponse.json(
+    {
+      error: "Sign in and buy credits to fix these errors. Scanning stays free.",
+      code: "credits_required",
+    },
+    { status: 402 }
+  );
 }

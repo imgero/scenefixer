@@ -87,8 +87,8 @@ export default function HowItWorksPage() {
             detection toward the region you flagged.
           </p>
           <p className="text-gray-600 leading-relaxed">
-            No account required to try it. First-time visitors get one free beta fix —
-            tracked with an anonymous UUID stored in your browser, no email needed.
+            Scanning is free, and first-time visitors can try a scan without an account.
+            Fixing uses credits, which need a free account to hold them.
           </p>
         </div>
 
@@ -289,7 +289,6 @@ export default function HowItWorksPage() {
               </thead>
               <tbody>
                 {[
-                  ["Free", "480p (downscaled)", "\"Fixed with Scene Fixer\"", "text-gray-600"],
                   ["Starter", "720p (native Aleph output)", "None", "text-emerald-600"],
                   ["Pro / Studio", "1080p (bicubic upscale)", "None", "text-emerald-600"],
                   ["Pay-per-fix", "720p", "None", "text-emerald-600"],
