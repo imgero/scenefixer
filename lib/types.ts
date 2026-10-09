@@ -213,20 +213,19 @@ export const PLAN_LIMITS: Record<Plan, {
   qualityLabel: string;
   watermark: boolean;
 }> = {
-  // 90 credits = 90 seconds of fixed output a month.
+  // Zero: finding errors is free, fixing them is paid.
   //
-  // Deliberately generous, and the generosity is close to free: fixes draw on
-  // a PREPAID Runway balance (230,812 credits sitting unused as of 13 Sep), so
-  // the marginal cash cost of a fix is zero — the money is already spent. What
-  // costs live cash is analysis (Claude vision, billed per scan), and that is
-  // bounded separately by FREE_ANALYSIS_SECONDS and FREE_SCANS_PER_DAY.
+  // The 90-credit grant assumed a fix was close to free because Runway is
+  // prepaid. It is not: every fix job also re-scans the whole output video
+  // with Opus, and that is live cash. Between 7 and 9 Oct three free fix jobs
+  // and four free scans spent a $10 Anthropic top-up in two days, against no
+  // revenue. Scanning stays free (FREE_SCANS_PER_DAY) so people still see
+  // what is wrong with their video; fixing draws on purchased credits only.
   //
-  // The objective right now is successful fixes and downloads, not revenue.
-  // Only 2 of 8 fix attempts in the 8-13 Sep window ever verified, and no user
-  // has yet downloaded a video this product demonstrably repaired. Until that
-  // happens the grant should not be what stops anyone, and it can be cut once
-  // there is something to protect.
-  free:    { creditsPerMonth: 90,  qualityLabel: "480p",  watermark: true  },
+  // qualityLabel/watermark here only apply to a free-plan fix that somehow
+  // runs without purchased credits. A fix paid with credits gets
+  // PAY_PER_FIX_OUTPUT instead — see the fix route.
+  free:    { creditsPerMonth: 0,   qualityLabel: "480p",  watermark: true  },
   // Legacy subscription tiers. No longer sold — the pricing page is credit
   // packs only — but existing subscribers keep their grant until they cancel,
   // so these must keep resolving. The old free-30 > starter-20 inversion is
@@ -236,6 +235,16 @@ export const PLAN_LIMITS: Record<Plan, {
   pro:     { creditsPerMonth: 300, qualityLabel: "1080p", watermark: false },
   studio:  { creditsPerMonth: 800, qualityLabel: "1080p", watermark: false },
 };
+
+/**
+ * What a fix paid for with purchased credits is delivered as.
+ *
+ * Buying a pack does not change `plan`, so a pack buyer is still "free" and
+ * would otherwise get the free plan's 480p + watermark on output they paid
+ * for. With the free grant at zero that would be every fix. 720p, no
+ * watermark is what /how-it-works has always promised pay-per-fix.
+ */
+export const PAY_PER_FIX_OUTPUT = { qualityLabel: "720p", watermark: false } as const;
 
 export type UserDoc = {
   uid: string;

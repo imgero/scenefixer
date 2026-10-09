@@ -396,7 +396,7 @@ export default function DropZone() {
     <div className="w-full max-w-xl mx-auto flex flex-col gap-3">
       {betaMode && !user && (
         <div className="flex items-center justify-between rounded-xl bg-amber-50 border border-amber-200 px-3 py-2">
-          <span className="text-xs text-amber-700 font-medium">Beta tester mode — 1 free fix</span>
+          <span className="text-xs text-amber-700 font-medium">Beta tester mode — free scan</span>
           <button
             onClick={handleSignIn}
             className="text-xs text-amber-800 underline underline-offset-2 hover:opacity-70"

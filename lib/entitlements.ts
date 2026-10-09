@@ -36,7 +36,7 @@ export const MONTHLY_SPEND_CEILING: Record<Plan, number> = {
   //
   // Purchased credits stack on top of the grant, so the headroom above it is
   // what a credit pack can actually buy within one month — 300 lets a free
-  // user spend their 90 plus a $100/240-credit pack without hitting this.
+  // user (grant 0) spend a $100/190-credit pack without hitting this.
   free: 300,
   starter: 400,
   pro: 800,

@@ -8,7 +8,7 @@ import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup } from "fire
 import Link from "next/link";
 import posthog from "posthog-js";
 import { registerLoopsContact } from "@/lib/loops";
-import { PLAN_LIMITS, FREE_SCANS_PER_DAY } from "@/lib/types";
+import { FREE_SCANS_PER_DAY } from "@/lib/types";
 import { HelpLink } from "@/components/HelpDialog";
 
 /**
@@ -28,14 +28,13 @@ import { HelpLink } from "@/components/HelpDialog";
 const FREE_TIER = {
   scanMinutes: 5,
   scansPerDay: FREE_SCANS_PER_DAY,
-  credits: PLAN_LIMITS.free.creditsPerMonth,
 };
 
 const CREDIT_PACKS = [
-  { pack: "10",  price: 10,  credits: 18,  label: "" },
-  { pack: "25",  price: 25,  credits: 50,  label: "save ~10%" },
-  { pack: "50",  price: 50,  credits: 110, label: "save ~18%" },
-  { pack: "100", price: 100, credits: 240, label: "best value" },
+  { pack: "10",  price: 10,  credits: 15,  label: "" },
+  { pack: "25",  price: 25,  credits: 40,  label: "save ~6%" },
+  { pack: "50",  price: 50,  credits: 85,  label: "save ~12%" },
+  { pack: "100", price: 100, credits: 190, label: "best value" },
 ];
 
 export default function PricingPage() {
@@ -158,9 +157,6 @@ function PricingContent() {
           <p className="text-sm text-gray-400">
             <span className="text-black font-semibold">1 credit = 1 second</span> of fixed output · Max 8 fixes per upload · Refund if a fix doesn&apos;t land
           </p>
-          <p className="text-sm text-gray-500 mt-1">
-            Free accounts need a verified email address before the first fix.
-          </p>
 
         </div>
 
@@ -194,20 +190,8 @@ function PricingContent() {
             <li className="flex items-start gap-2">
               <span className="text-gray-400 mt-0.5">✓</span>
               <span className="text-gray-700">
-                <span className="text-black font-semibold">
-                  {FREE_TIER.credits} free credits
-                </span>{" "}
-                a month — {FREE_TIER.credits} seconds of fixed output
-              </span>
-            </li>
-            <li className="flex items-start gap-2">
-              <span className="text-gray-400 mt-0.5">✓</span>
-              <span className="text-gray-700">480p output with a watermark</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <span className="text-gray-400 mt-0.5">✓</span>
-              <span className="text-gray-700">
-                Refunded automatically if a fix doesn&apos;t land
+                <span className="text-black font-semibold">Every error found</span>,
+                with where it is and how we would fix it
               </span>
             </li>
           </ul>
@@ -216,10 +200,11 @@ function PricingContent() {
         {/* ── Credit packs ── */}
         <div className="mt-12 max-w-md mx-auto rounded-2xl border border-gray-200 bg-gray-50 p-6">
           <div className="mb-5">
-            <h3 className="font-semibold text-black text-base mb-1">Buy credits one-time</h3>
+            <h3 className="font-semibold text-black text-base mb-1">Buy credits to fix</h3>
             <p className="text-sm text-gray-500">
-              Top up when you need to. Credits never expire and there is nothing
-              to cancel.
+              Fixing uses credits. Output is 720p with no watermark, and a fix
+              that doesn&apos;t land is refunded automatically. Credits never
+              expire and there is nothing to cancel.
             </p>
           </div>
 
@@ -270,7 +255,7 @@ function PricingContent() {
         )}
 
         <p className="mt-4 text-center text-xs text-gray-400">
-          Prices in USD. Credits you buy never expire; the free monthly credits reset on the 1st.
+          Prices in USD. Credits you buy never expire.
         </p>
 
         <div className="mt-8 text-center space-y-2">

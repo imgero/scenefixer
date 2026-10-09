@@ -230,7 +230,7 @@ export default function JobPage({ params }: Props) {
         if (data.code === "unauthenticated") {
           setFixError("Sign in to fix continuity errors.");
         } else if (data.code === "quota_exceeded") {
-          setFixError(data.error + " Upgrade your plan or buy fix credits.");
+          setFixError(data.error + " Buy credits to fix these errors.");
         } else if (data.code === "beta_used") {
           setFixError("Your beta fix has already been used. Sign up free to get another fix!");
         } else {
@@ -646,7 +646,7 @@ export default function JobPage({ params }: Props) {
                       href="/pricing"
                       className="px-5 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 font-semibold text-sm hover:bg-amber-100 transition-colors"
                     >
-                      Out of fixes · Upgrade →
+                      Buy credits to fix →
                     </a>
                   ) : (
                     <button
