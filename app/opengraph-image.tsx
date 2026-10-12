@@ -84,7 +84,7 @@ export default async function Image() {
                   background: "#f97316",
                 }}
               />
-              CLAUDE OPUS 4.8
+              CLAUDE OPUS + HAIKU
             </div>
           </div>
 

@@ -5,7 +5,7 @@ import Link from "next/link";
 export const metadata: Metadata = {
   title: "How Scene Fixer Works — AI Video Continuity Pipeline",
   description:
-    "A transparent, technical walkthrough of how Scene Fixer detects continuity breaks across AI video shots — wardrobe, lighting, props, eyeline — and fixes them using PySceneDetect, Claude Opus 4.8, and Runway Gen-4 Aleph.",
+    "A transparent, technical walkthrough of how Scene Fixer detects continuity breaks across AI video shots — wardrobe, lighting, props, eyeline — and fixes them using Claude (Opus for paid scans, Haiku for free scans) and Runway Gen-4 Aleph.",
   alternates: {
     canonical: "/how-it-works",
   },
@@ -58,9 +58,10 @@ export default function HowItWorksPage() {
           </h1>
           <p className="text-gray-500 text-lg leading-relaxed">
             Scene Fixer is the continuity supervisor for AI video. It splits your sequence
-            into shots, uses Claude Opus 4.8 to catch every inconsistency — wardrobe,
-            lighting, props, eyeline — then inpaints each fix frame-by-frame with Runway
-            Aleph. Works on output from any AI video model. Here&apos;s exactly what
+            into shots, uses Claude to look for inconsistencies — wardrobe, lighting,
+            props, eyeline — then inpaints each fix frame-by-frame with Runway Aleph.
+            Free scans use Claude Haiku, a smaller and weaker model; with credits, every
+            scan uses Claude Opus. Works on output from any AI video model. Here&apos;s exactly what
             happens under the hood.
           </p>
         </div>
@@ -127,17 +128,27 @@ export default function HowItWorksPage() {
             <h2 className="text-xl font-semibold text-black">Continuity error detection</h2>
           </div>
           <div className="flex items-center gap-2 mb-4 ml-11">
-            <ModelBadge>Claude Opus 4.8</ModelBadge>
+            <ModelBadge>Claude Opus (deep scan)</ModelBadge>
+            <ModelBadge>Claude Haiku (free scan)</ModelBadge>
             <ModelBadge>Vision</ModelBadge>
           </div>
           <p className="text-gray-600 leading-relaxed mb-4">
-            Every adjacent shot pair is sent to{" "}
-            <a href="https://www.anthropic.com/claude/opus" target="_blank" rel="noopener noreferrer"
-              className="text-black font-medium underline underline-offset-2">Claude Opus 4.8</a>,
-            Anthropic&apos;s most capable vision model. It receives the last keyframe of shot A
-            and the first keyframe of shot B and identifies continuity errors across six
-            categories: props, wardrobe, hair & makeup, lighting, set dressing, and eyeline.
+            Pairs of shots are sent to Claude together with keyframes from each, and it
+            identifies continuity errors across six categories: props, wardrobe, hair &
+            makeup, lighting, set dressing, and eyeline.
           </p>
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 mb-4">
+            <span className="font-semibold">Which model scans your video.</span>{" "}
+            A <strong>free scan</strong> uses{" "}
+            <a href="https://www.anthropic.com/claude/haiku" target="_blank" rel="noopener noreferrer"
+              className="font-medium underline underline-offset-2">Claude Haiku</a>,
+            a smaller, faster and weaker model. It is a quick check: it can miss errors
+            and it stops at a fixed amount of work per video. While your account holds
+            credits, every scan is the <strong>deep scan</strong> on{" "}
+            <a href="https://www.anthropic.com/claude/opus" target="_blank" rel="noopener noreferrer"
+              className="font-medium underline underline-offset-2">Claude Opus</a>,
+            Anthropic&apos;s most capable model.
+          </div>
           <p className="text-gray-600 leading-relaxed mb-4">
             For each inconsistency, Claude returns a structured JSON object with the error
             type, severity (low / medium / high), a human-readable description of what
@@ -159,7 +170,7 @@ export default function HowItWorksPage() {
           </div>
           <Shot
             src={`${S}17.51.03.png`}
-            alt="Scene Fixer running Claude Opus 4.8 detection — pipeline at step 3"
+            alt="Scene Fixer running Claude detection — pipeline at step 3"
           />
         </div>
 
@@ -317,7 +328,7 @@ export default function HowItWorksPage() {
             {[
               ["Upload", "Firebase Storage (signed URL, direct from browser)"],
               ["Shot detection", "PySceneDetect → 5 keyframes / shot"],
-              ["Error detection", "Claude Opus 4.8 vision — flags what's inconsistent and describes where"],
+              ["Error detection", "Claude vision — Haiku on free scans (lighter, can miss errors), Opus on the deep scan with credits"],
               ["User review", "Confirm each flag, mark the exact region, or add missed errors manually"],
               ["Inpainting", "Runway Gen-4 Aleph (per confirmed error, sequential)"],
               ["Verification", "Claude Opus 4.8 vision (per fixed clip)"],

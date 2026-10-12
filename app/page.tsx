@@ -149,7 +149,7 @@ export default function HomePage() {
             </a>
             <span className="inline-flex items-center gap-2 text-gray-400 text-[11px] uppercase tracking-widest border border-gray-200 rounded-full px-3 py-1 bg-white">
               <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />
-              Claude Opus 4.8
+              Claude Opus · Haiku on free scans
             </span>
           </div>
           <h1 className="text-5xl sm:text-6xl font-semibold text-black tracking-tight leading-[1.05] mb-5">
@@ -318,7 +318,11 @@ export default function HomePage() {
             </a>
           </div>
           <p className="text-gray-600 text-base mb-3 max-w-md mx-auto">
-            Now in open beta — built on Runway Aleph and Claude Opus 4.8.
+            Now in open beta — built on Runway Aleph and Claude.
+          </p>
+          <p className="text-gray-500 text-sm mb-3 max-w-md mx-auto">
+            Free scans run on Claude Haiku, a smaller and weaker model that can miss
+            errors. Buy credits for the full deep scan with Claude Opus.
           </p>
           <p className="text-gray-400 text-sm max-w-xl mx-auto mb-10 leading-relaxed">
             It&apos;s early, and detection won&apos;t always be perfect. But every fix runs on the footage you already have — so there&apos;s nothing to reroll, and nothing to lose by trying it on your worst clip.

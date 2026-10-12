@@ -461,6 +461,11 @@ export default function DropZone() {
         <p className="text-red-600 text-sm text-center">{error}</p>
       )}
 
+      <p className="text-center text-[11px] text-gray-500">
+        Free scans use Claude Haiku, a smaller and weaker model that can miss errors.
+        Accounts with credits get the full deep scan with Claude Opus.
+      </p>
+
       <p className="text-center text-[11px] text-gray-400">
         Beta — results may vary.{" "}
         <HelpLink source="dropzone" className="underline underline-offset-2 hover:text-gray-600 transition-colors">
