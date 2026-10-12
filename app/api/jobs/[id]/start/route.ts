@@ -7,7 +7,7 @@ import { ensureEntitlement } from "@/lib/entitlements";
 // Single source of truth — the pricing page states this same number, and the
 // two drifting apart means the site promises one thing and the API enforces
 // another.
-import { FREE_SCANS_PER_DAY } from "@/lib/types";
+import { FREE_SCANS_PER_DAY, CREDIT_HOLDER_SCANS_PER_DAY } from "@/lib/types";
 
 export async function POST(
   req: NextRequest,
@@ -48,7 +48,8 @@ export async function POST(
       return NextResponse.json({ error: "inputVideoUrl required" }, { status: 400 });
     }
 
-    // Rate-limit free-tier authenticated users to 3 scans/day.
+    // Rate-limit free-plan accounts: FREE_SCANS_PER_DAY, or more while they
+    // hold purchased credits.
     if (uid) {
       // Ensure the full entitlement shape FIRST. This route used to create the
       // user document with a merge-write of only { scanDate, scansToday },
@@ -66,7 +67,9 @@ export async function POST(
         const userData = userSnap.exists ? userSnap.data()! : {};
         const scanDate = userData.scanDate ?? "";
         const scansToday = scanDate === today ? (userData.scansToday ?? 0) : 0;
-        if (scansToday >= FREE_SCANS_PER_DAY) {
+        const dailyLimit =
+          ent.creditsBalance > 0 ? CREDIT_HOLDER_SCANS_PER_DAY : FREE_SCANS_PER_DAY;
+        if (scansToday >= dailyLimit) {
           // No longer says "upgrade": there are no plans to upgrade to. The
           // daily limit exists because analysis is the part that costs real
           // money per run (Claude vision, billed to us on every scan, free
@@ -74,7 +77,9 @@ export async function POST(
           return NextResponse.json(
             {
               error:
-                `That's your ${FREE_SCANS_PER_DAY} free scans for today — they reset at midnight UTC.`,
+                dailyLimit === 1
+                  ? "That's your free scan for today. It resets at midnight UTC."
+                  : `That's your ${dailyLimit} scans for today. They reset at midnight UTC.`,
               code: "scan_limit",
             },
             { status: 429 }

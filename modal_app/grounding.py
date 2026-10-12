@@ -205,6 +205,8 @@ def validate_bbox_contains(
     image_url: str,
     bbox: dict,
     object_query: str,
+    model: str = "claude-opus-4-8",
+    meter=None,
 ) -> bool:
     """
     Ask Haiku to look at the bbox crop and confirm it actually centrally
@@ -249,9 +251,11 @@ def validate_bbox_contains(
         crop_b64 = base64.b64encode(buf).decode()
 
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        # Haiku 5.5 (free scans) thinks by default, and thinking counts
+        # against max_tokens: 128 would end before any answer.
         validate_kwargs = dict(
-            model="claude-opus-4-8",
-            max_tokens=128,
+            model=model,
+            max_tokens=4000 if model.startswith("claude-haiku-5") else 128,
             messages=[{
                 "role": "user",
                 "content": [
@@ -289,7 +293,12 @@ def validate_bbox_contains(
                     _time.sleep(_retry_delays[_attempt])
                 else:
                     raise
-        raw = response.content[0].text.strip()
+        if meter is not None:
+            meter.record(model, response.usage)
+        # The first TEXT block: with thinking on, content[0] is a thinking block.
+        raw = next(
+            (b.text for b in response.content if getattr(b, "type", "") == "text"), ""
+        ).strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):

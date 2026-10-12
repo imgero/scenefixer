@@ -20,6 +20,7 @@ from modal_app.detect import (
     compare_pair,
     is_far_grade_error,
     collapse_by_defect_class,
+    tier_for_verify,
 )
 from modal_app.prompts import compute_continuity_score
 import os
@@ -80,10 +81,11 @@ def run_verify(job_id: str) -> dict:
 
         # Compare pairs and collect new errors
         pairs = get_pairs_to_compare(verify_shots)
+        tier = tier_for_verify(job)
         kept: list = []          # (shot_a, shot_b, err), for the collapse
         dropped_far = 0
         for shot_a, shot_b in pairs:
-            errors = compare_pair(job_id, shot_a, shot_b)
+            errors = compare_pair(job_id, shot_a, shot_b, tier=tier)
             for err in errors:
                 # Same rule detection uses. Without it, a correctly repaired
                 # video comes back covered in "new issues" that are really just
@@ -127,6 +129,10 @@ def run_verify(job_id: str) -> dict:
         # numbers are computed on different scales and the before/after
         # comparison shown to the user is meaningless.
         score_after = compute_continuity_score(new_errors, len(verify_shots))
+        print(
+            f"Verify: {tier.label} tier ({tier.pair_model}), Claude spend "
+            f"${tier.meter.spent_usd:.4f} over {tier.meter.calls} call(s)"
+        )
 
         # A verify pass that resolved fewer shots than the input had did not
         # measure the same video, and its score is not comparable to
