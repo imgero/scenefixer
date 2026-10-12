@@ -1,0 +1,52 @@
+# Deploys the Modal backend (modal_app/) from GitHub, so a merge into main
+# ships the pipeline without anyone's computer. Same command as by hand:
+# `modal deploy modal_app/app.py` from the repo root.
+#
+# Needs two repository secrets (Settings → Secrets and variables → Actions):
+#   MODAL_TOKEN_ID, MODAL_TOKEN_SECRET  — from modal.com → Settings → API Tokens
+#
+# Runs on every push to main that touches modal_app/, and on demand from the
+# Actions tab ("Run workflow").
+name: Deploy Modal backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "modal_app/**"
+      - ".github/workflows/deploy-modal.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-modal
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Modal token secrets are set
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::error::MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not set in the repository secrets."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # modal deploy imports modal_app/app.py locally, and app.py imports
+      # fastapi at module level for its endpoints.
+      - name: Install Modal CLI
+        run: pip install modal fastapi
+
+      - name: Deploy
+        run: modal deploy modal_app/app.py

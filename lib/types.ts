@@ -205,8 +205,16 @@ export const FREE_ANALYSIS_SECONDS: Record<Plan, number> = {
   free: 300, starter: 900, pro: 1800, studio: 3600,
 };
 
-/** Free scans per day before a scan draws on credits. */
-export const FREE_SCANS_PER_DAY = 3;
+/**
+ * Scans per day for a free-plan account.
+ *
+ * 1 for an account with no purchased credits; those scans run on Haiku with
+ * a hard $0.20 cap (FREE_SCAN_BUDGET_USD in modal_app/detect.py). An account
+ * holding purchased credits scans on Opus at full price, so it gets more, but
+ * still a limit: a $10 pack must not buy unlimited $3-5 scans.
+ */
+export const FREE_SCANS_PER_DAY = 1;
+export const CREDIT_HOLDER_SCANS_PER_DAY = 3;
 
 export const PLAN_LIMITS: Record<Plan, {
   creditsPerMonth: number;  // seconds of Runway output included per month

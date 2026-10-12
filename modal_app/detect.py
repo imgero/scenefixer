@@ -13,7 +13,9 @@ import json
 import os
 from datetime import datetime, timezone
 
+import threading
 import time
+from dataclasses import dataclass, field
 
 import anthropic
 
@@ -36,6 +38,141 @@ SMALL_VIDEO_THRESHOLD = 10  # ≤ this many shots → compare every pair
 # 10 standalone passes, and sequentially that is half an hour of someone
 # staring at a progress bar.
 DETECT_CONCURRENCY = 8
+
+# ── Scan tiers ──────────────────────────────────────────────────────────────
+#
+# A free scan is the part of the product that costs live cash with nothing
+# coming back: between 9 and 12 Oct, after fixing became paid, five free scans
+# and one free fix's verify emptied a $10 Anthropic top-up with no revenue.
+# One 11-shot free scan on Opus was ~$3-4 on its own.
+#
+# So the two kinds of scan run on different models:
+#
+# - PAID (a paid plan, or any purchased credits): exactly what ran before —
+#   Opus 5 for pairs, Opus 4.8 for standalone / holistic / bbox validation.
+# - FREE: Claude Haiku 5.5 for every call, at $0.10 / $0.50 per Mtok against
+#   Opus's $5 / $25 — roughly 1/50 of the price — with a hard dollar cap per
+#   scan on top. Once a free scan has spent FREE_SCAN_BUDGET_USD it makes no
+#   further Claude calls; the comparisons left are skipped and the job records
+#   that it was cut short.
+#
+# Haiku's detection quality on this task has NOT been measured against
+# scripts/detection-eval. Sonnet 5 found 16% of real errors there on 15 Sep;
+# measure Haiku before trusting its free-scan results.
+FREE_SCAN_MODEL = "claude-haiku-5-5"
+FREE_SCAN_BUDGET_USD = 0.20
+PAID_PAIR_MODEL = "claude-opus-5"
+PAID_SINGLE_MODEL = "claude-opus-4-8"
+
+# $ per Mtok (input, output). Cache writes bill at 1.25x input, reads at 0.1x.
+# Haiku 5.5's rate is for prompts up to 100K tokens; a detection call is ~10K.
+_PRICES_PER_MTOK = {
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-4-8": (5.0, 25.0),
+}
+
+
+class SpendMeter:
+    """
+    What one scan has spent on Claude, and whether it may spend more.
+
+    Shared by the detection worker threads, hence the lock. The check happens
+    before a call and the spend is recorded after it, so with
+    DETECT_CONCURRENCY calls in flight a free scan can overshoot its budget by
+    at most that many Haiku calls (fractions of a cent each).
+    """
+
+    def __init__(self, budget_usd: float | None):
+        self.budget_usd = budget_usd
+        self.spent_usd = 0.0
+        self.calls = 0
+        self.skipped = 0
+        self._lock = threading.Lock()
+
+    def allow(self) -> bool:
+        with self._lock:
+            if self.budget_usd is not None and self.spent_usd >= self.budget_usd:
+                self.skipped += 1
+                return False
+            return True
+
+    def record(self, model: str, usage) -> None:
+        in_rate, out_rate = _PRICES_PER_MTOK.get(model, (5.0, 25.0))
+        cost = (
+            (getattr(usage, "input_tokens", 0) or 0) * in_rate
+            + (getattr(usage, "cache_creation_input_tokens", 0) or 0) * in_rate * 1.25
+            + (getattr(usage, "cache_read_input_tokens", 0) or 0) * in_rate * 0.1
+            + (getattr(usage, "output_tokens", 0) or 0) * out_rate
+        ) / 1_000_000
+        with self._lock:
+            self.spent_usd += cost
+            self.calls += 1
+
+
+@dataclass
+class ScanTier:
+    label: str               # "free" | "paid", stored on the job as scanTier
+    pair_model: str
+    single_model: str
+    meter: SpendMeter = field(default_factory=lambda: SpendMeter(None))
+
+    @property
+    def cache_suffix(self) -> str:
+        # Paid keeps the cache keys it always had, so existing entries stay
+        # valid. Free results are keyed apart so a Haiku answer is never
+        # served to an Opus scan of the same frames.
+        return "" if self.label == "paid" else f"|{self.pair_model}"
+
+
+def paid_tier() -> ScanTier:
+    return ScanTier("paid", PAID_PAIR_MODEL, PAID_SINGLE_MODEL)
+
+
+def free_tier(budget_usd: float | None = FREE_SCAN_BUDGET_USD) -> ScanTier:
+    return ScanTier("free", FREE_SCAN_MODEL, FREE_SCAN_MODEL, SpendMeter(budget_usd))
+
+
+def tier_for_job(job_doc: dict) -> ScanTier:
+    """
+    Paid when the owner is on a paid plan or holds purchased credits.
+
+    Anything that cannot be confirmed — no owner (an anonymous beta scan), a
+    missing user document, a read that fails — scans free. The failure mode
+    of guessing wrong is then a cheaper scan, never an uncapped one.
+    """
+    uid = job_doc.get("ownerUid")
+    if not uid:
+        return free_tier()
+    try:
+        user = get_db().collection("users").document(uid).get().to_dict() or {}
+    except Exception as exc:
+        print(f"tier_for_job: could not read user {uid} ({exc}); scanning free")
+        return free_tier()
+    paid = (user.get("plan") or "free") != "free" or (user.get("creditsBalance") or 0) > 0
+    return paid_tier() if paid else free_tier()
+
+
+def tier_for_verify(job_doc: dict) -> ScanTier:
+    """
+    The verify pass uses the same models as the scan it is compared against.
+
+    scoreAfter is set against scoreBefore. Opus finds things Haiku does not,
+    so an Opus verify of a Haiku-scanned job would report everything Haiku
+    missed as damage the fix introduced. Verify only runs for a fix someone
+    paid for, so it is not capped.
+    """
+    if job_doc.get("scanTier") == "free":
+        return free_tier(budget_usd=None)
+    return paid_tier()
+
+
+def _max_tokens_for(model: str, wanted: int) -> int:
+    # Haiku 5.5 thinks by default and thinking counts against max_tokens; the
+    # 128- and 1024-token caps sized for Opus 4.8 would end mid-thought with
+    # no answer at all.
+    return max(wanted, 4000) if model.startswith("claude-haiku-5") else wanted
+
 
 # Writing an error is not a cheap Firestore add: it runs Grounding DINO over
 # every keyframe of the target shot first. Those writes run concurrently too,
@@ -469,6 +606,7 @@ def compare_pair(
     shot_a: dict,
     shot_b: dict,
     user_hint: str = "",
+    tier: ScanTier | None = None,
 ) -> list[dict]:
     """
     Compare two shots using up to 3 frames per shot (sampled across the
@@ -487,12 +625,16 @@ def compare_pair(
     if not urls_a or not urls_b:
         return []
 
-    key = cache_key(urls_a, urls_b, user_hint)
+    tier = tier or paid_tier()
+    key = cache_key(urls_a, urls_b, (user_hint or "") + tier.cache_suffix)
     cache_ref = db.collection("cache").document(key)
     cached = cache_ref.get()
 
     if cached.exists:
         return cached.to_dict().get("errors", [])
+
+    if not tier.meter.allow():
+        return []
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
@@ -535,12 +677,16 @@ def compare_pair(
     # It needs its own configuration. Thinking is ON by default on Opus 5 and
     # OFF on 4.8, and thinking counts against max_tokens — at the old budget of
     # 1024 every response truncated mid-JSON and parsed as nothing.
+    #
+    # A free scan sends the same request to Haiku 5.5, which also thinks by
+    # default; the 4000-token budget covers that too.
     response = _create_with_retry(client,
-        model="claude-opus-5",
+        model=tier.pair_model,
         max_tokens=4000,
         thinking={"type": "adaptive"},
         messages=[{"role": "user", "content": content}],
     )
+    tier.meter.record(tier.pair_model, response.usage)
 
     raw = _first_text(response).strip()
     # Strip markdown code fences if present
@@ -587,7 +733,9 @@ def compare_pair(
     return errors
 
 
-def detect_standalone(job_id: str, shot: dict, user_hint: str = "") -> list[dict]:
+def detect_standalone(
+    job_id: str, shot: dict, user_hint: str = "", tier: ScanTier | None = None
+) -> list[dict]:
     """
     Ask Opus about STANDALONE errors visible inside a single shot (anachronisms,
     visible production equipment, out-of-place props). Independent of any
@@ -598,12 +746,16 @@ def detect_standalone(job_id: str, shot: dict, user_hint: str = "") -> list[dict
     if not urls:
         return []
 
+    tier = tier or paid_tier()
     db = get_db()
-    key = cache_key(urls, urls, (user_hint or "") + "|standalone")
+    key = cache_key(urls, urls, (user_hint or "") + "|standalone" + tier.cache_suffix)
     cache_ref = db.collection("cache").document(key)
     cached = cache_ref.get()
     if cached.exists:
         return cached.to_dict().get("errors", [])
+
+    if not tier.meter.allow():
+        return []
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
@@ -614,10 +766,11 @@ def detect_standalone(job_id: str, shot: dict, user_hint: str = "") -> list[dict
     content.append({"type": "text", "text": build_standalone_prompt(user_hint)})
 
     response = _create_with_retry(client,
-        model="claude-opus-4-8",
-        max_tokens=1024,
+        model=tier.single_model,
+        max_tokens=_max_tokens_for(tier.single_model, 1024),
         messages=[{"role": "user", "content": content}],
     )
+    tier.meter.record(tier.single_model, response.usage)
 
     raw = _first_text(response).strip()
     if raw.startswith("```"):
@@ -647,7 +800,13 @@ def _frames_for_shot(shot: dict) -> list[str]:
     return [single] if isinstance(single, str) else []
 
 
-def write_errors(job_id: str, shot_a: dict, shot_b: dict, errors: list[dict]) -> None:
+def write_errors(
+    job_id: str,
+    shot_a: dict,
+    shot_b: dict,
+    errors: list[dict],
+    tier: ScanTier | None = None,
+) -> None:
     """
     Write detected errors to Firestore. For each Opus-flagged error, call
     Grounding DINO to get a precise bbox on the keyframe where the object
@@ -656,6 +815,7 @@ def write_errors(job_id: str, shot_a: dict, shot_b: dict, errors: list[dict]) ->
     """
     from modal_app.grounding import localize_best_frame, validate_bbox_contains
 
+    tier = tier or paid_tier()
     db = get_db()
     errors_ref = db.collection("jobs").document(job_id).collection("errors")
 
@@ -690,8 +850,12 @@ def write_errors(job_id: str, shot_a: dict, shot_b: dict, errors: list[dict]) ->
         # description) so we check the specific object, not the whole scene.
         # Reject on failure: better to leave bbox empty and force the user
         # to mark manually than to send a wrong-spot bbox to Aleph.
+        # Over a free scan's budget the box is dropped unvalidated, the same
+        # outcome as a failed validation: the user marks the spot by hand.
         if bbox and best_url and query:
-            ok = validate_bbox_contains(best_url, bbox, query)
+            ok = tier.meter.allow() and validate_bbox_contains(
+                best_url, bbox, query, model=tier.single_model, meter=tier.meter
+            )
             if not ok:
                 print(
                     f"Bbox validation REJECTED Grounding DINO result for "
@@ -735,6 +899,7 @@ def detect_holistic(
     job_id: str,
     shots: list[dict],
     user_hint: str = "",
+    tier: ScanTier | None = None,
 ) -> list[tuple[dict, dict, dict]]:
     """
     Holistic scene-level consistency check. Sends one representative keyframe
@@ -762,14 +927,17 @@ def detect_holistic(
         return []
 
     # Cache holistic results to avoid re-running on repeated jobs
+    tier = tier or paid_tier()
     db = get_db()
     all_urls = [url for _, url in indexed]
-    raw_key = "|".join(all_urls) + f"|{HOLISTIC_VERSION}|{user_hint or ''}"
+    raw_key = "|".join(all_urls) + f"|{HOLISTIC_VERSION}|{user_hint or ''}" + tier.cache_suffix
     cache_key = hashlib.sha256(raw_key.encode()).hexdigest()[:40] + "_holistic"
     cache_ref = db.collection("cache").document(cache_key)
     cached = cache_ref.get()
     if cached.exists:
         outliers_raw = cached.to_dict().get("outliers", [])
+    elif not tier.meter.allow():
+        outliers_raw = []
     else:
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         content: list = []
@@ -779,10 +947,11 @@ def detect_holistic(
         content.append({"type": "text", "text": build_holistic_prompt(user_hint)})
 
         response = _create_with_retry(client,
-            model="claude-opus-4-8",
-            max_tokens=1024,
+            model=tier.single_model,
+            max_tokens=_max_tokens_for(tier.single_model, 1024),
             messages=[{"role": "user", "content": content}],
         )
+        tier.meter.record(tier.single_model, response.usage)
         raw = _first_text(response).strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -903,6 +1072,9 @@ def run_detect(job_id: str) -> int:
     # so results are indexed rather than appended as they land.
     from concurrent.futures import ThreadPoolExecutor
 
+    tier = tier_for_job(job_doc)
+    print(f"Detection: {tier.label} scan ({tier.pair_model})")
+
     pair_list = get_pairs_to_compare(shots) if len(shots) >= 2 else []
     standalone_shots = sample_shots_for_standalone(shots)
     tasks: list[tuple[dict, dict]] = [
@@ -917,8 +1089,8 @@ def run_detect(job_id: str) -> int:
         idx, (sa, sb) = idx_task
         try:
             if sa["id"] == sb["id"]:
-                return idx, sa, sb, detect_standalone(job_id, sa, user_hint)
-            return idx, sa, sb, compare_pair(job_id, sa, sb, user_hint)
+                return idx, sa, sb, detect_standalone(job_id, sa, user_hint, tier)
+            return idx, sa, sb, compare_pair(job_id, sa, sb, user_hint, tier)
         except Exception as exc:
             # One comparison failing must not lose the other fifty-five.
             print(f"Detection task {idx} failed ({type(exc).__name__}: {exc})")
@@ -973,7 +1145,7 @@ def run_detect(job_id: str) -> int:
     # shot against the whole sequence, so "this shot is the odd one out" is
     # exactly the cross-scene grade judgement adjacency is meant to suppress
     # between arbitrary pairs. It is the sanctioned way to catch a rogue clip.
-    for result in detect_holistic(job_id, shots, user_hint):
+    for result in detect_holistic(job_id, shots, user_hint, tier):
         raw.append(result)
 
     # 2. Dedupe: when multiple pairs flag the SAME underlying error (e.g.
@@ -1059,7 +1231,7 @@ def run_detect(job_id: str) -> int:
     def _write_one(item):
         sa, sb, err = item
         try:
-            write_errors(job_id, sa, sb, [err])
+            write_errors(job_id, sa, sb, [err], tier)
             return True
         except Exception as exc:
             # One failed localization must not lose the other thirty-five.
@@ -1080,10 +1252,23 @@ def run_detect(job_id: str) -> int:
     # fifteen-shot video is scored as if it were a two-shot one.
     score = compute_continuity_score(all_errors, len(shots))
 
+    budget_hit = tier.meter.skipped > 0
+    if budget_hit:
+        print(
+            f"Detection: free-scan budget ${tier.meter.budget_usd:.2f} reached; "
+            f"{tier.meter.skipped} Claude call(s) skipped"
+        )
+    print(f"Detection: Claude spend ${tier.meter.spent_usd:.4f} over {tier.meter.calls} call(s)")
+
     job_ref.update({
         "status": "awaiting_confirmation",
         "errorCount": total_errors,
         "scoreBefore": score,
+        # verify reads scanTier to compare like with like (tier_for_verify).
+        "scanTier": tier.label,
+        "scanModel": tier.pair_model,
+        "scanCostUsd": round(tier.meter.spent_usd, 4),
+        "scanBudgetHit": budget_hit,
     })
 
     from modal_app import analytics
@@ -1105,6 +1290,12 @@ def run_detect(job_id: str) -> int:
             "pair_count": len(get_pairs_to_compare(shots)) if len(shots) >= 2 else 0,
             "raw_before_dedupe": len(raw),
             "had_zero_shots": False,
+            "scan_tier": tier.label,
+            "scan_model": tier.pair_model,
+            "claude_cost_usd": round(tier.meter.spent_usd, 4),
+            "claude_calls": tier.meter.calls,
+            "budget_hit": budget_hit,
+            "calls_skipped": tier.meter.skipped,
         },
         job=job_doc,
     )
