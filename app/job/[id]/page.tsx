@@ -392,6 +392,32 @@ export default function JobPage({ params }: Props) {
         )}
       </div>
 
+      {/* Free scan notice. A free scan runs on Claude Haiku with a hard cost
+          cap (modal_app/detect.py), and says so rather than letting its
+          findings pass for the Opus deep scan. */}
+      {job.scanTier === "free" && job.scoreBefore !== undefined && (
+        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm text-amber-900 font-semibold mb-1">
+            This was a free scan with Claude Haiku
+          </p>
+          <p className="text-xs text-amber-800">
+            Haiku is a smaller and weaker model than the one our deep scan uses, so
+            it can miss errors or flag things that are fine.
+            {job.scanBudgetHit
+              ? " This video was also too long for a full free scan, so part of it was not checked."
+              : ""}{" "}
+            With credits on your account, every scan is the deep scan with Claude Opus.
+          </p>
+          <Link
+            href="/pricing"
+            className="inline-block mt-2 text-xs font-semibold text-amber-900 underline underline-offset-2 hover:opacity-70"
+            onClick={() => posthog.capture("deep_scan_clicked", { job_id: jobId })}
+          >
+            Get the deep scan →
+          </Link>
+        </div>
+      )}
+
       {/* Partial analysis.
           Replaces what used to be a hard rejection: a video over the free
           analysis budget was refused outright with "Video too long — upgrade

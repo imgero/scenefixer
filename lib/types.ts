@@ -50,6 +50,14 @@ export type Job = {
    * is what those jobs were, since anything longer was rejected outright.
    */
   analysisTruncated?: boolean;
+  /**
+   * Which scan ran: "free" is Claude Haiku with a hard cost cap, "paid" is
+   * the Opus deep scan. Written by run_detect; absent on jobs from before
+   * 12 Oct, which were all Opus.
+   */
+  scanTier?: "free" | "paid";
+  /** A free scan hit its cost cap and skipped the rest of its comparisons. */
+  scanBudgetHit?: boolean;
   /** Seconds of the video actually analysed. */
   analysedSeconds?: number;
   /** Full duration of the uploaded video. */

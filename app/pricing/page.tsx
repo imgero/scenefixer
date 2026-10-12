@@ -190,8 +190,8 @@ function PricingContent() {
             <li className="flex items-start gap-2">
               <span className="text-gray-400 mt-0.5">✓</span>
               <span className="text-gray-700">
-                <span className="text-black font-semibold">A quick continuity scan</span>{" "}
-                showing what we found and how we would fix it
+                <span className="text-black font-semibold">A quick scan with Claude Haiku</span>,
+                a smaller and weaker model that can miss errors
               </span>
             </li>
           </ul>
@@ -202,8 +202,8 @@ function PricingContent() {
           <div className="mb-5">
             <h3 className="font-semibold text-black text-base mb-1">Buy credits to fix</h3>
             <p className="text-sm text-gray-500">
-              Fixing uses credits. While you hold credits, every scan is our
-              full deep scan. Output is 720p with no watermark, and a fix that
+              Fixing uses credits. While you hold credits, every scan is the
+              full deep scan with Claude Opus. Output is 720p with no watermark, and a fix that
               doesn&apos;t land is refunded automatically. Credits never expire
               and there is nothing to cancel.
             </p>
