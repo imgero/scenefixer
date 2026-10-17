@@ -77,6 +77,13 @@ _OUTAGE_MESSAGE = (
 )
 
 
+_UNREADABLE_MESSAGE = (
+    "We couldn't read this video file. It may be incomplete (for example, "
+    "saved before the recording finished) or in an unusual format. Your scan "
+    "has not been counted. Please re-export it as a standard MP4 and try again."
+)
+
+
 def _is_upstream_outage(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in _UPSTREAM_OUTAGE_MARKERS)
@@ -176,17 +183,28 @@ def run_process_job(job_id: str):
         # Don't clobber a job that already finished successfully — Modal
         # worker preemption can raise mid-flight even after run_detect set
         # status to awaiting_confirmation.
+        import subprocess
         from modal_app.firebase import get_db
         current = get_db().collection("jobs").document(job_id).get().to_dict() or {}
         outage = _is_upstream_outage(e)
-        scan_refunded = _refund_daily_scan(current.get("ownerUid")) if outage else False
+        finished = current.get("status") in ("awaiting_confirmation", "fixing", "verifying", "done")
+        # The scan is counted before analysis runs. Any failure that leaves no
+        # result gives it back: an unreadable file or a crash is no reason to
+        # lock someone out until midnight (17 Oct: a truncated upload burned a
+        # free scan, and three good re-exports were then refused).
+        scan_refunded = False if finished else _refund_daily_scan(current.get("ownerUid"))
 
-        if current.get("status") not in ("awaiting_confirmation", "fixing", "verifying", "done"):
+        if not finished:
+            unreadable = isinstance(e, subprocess.CalledProcessError)
             get_db().collection("jobs").document(job_id).update({
                 "status": "error",
                 # Never show the user an upstream provider's billing or rate
-                # limit text — it reads as a complaint about their account.
-                "errorMessage": _OUTAGE_MESSAGE if outage else str(e),
+                # limit text, or a raw ffmpeg command line.
+                "errorMessage": (
+                    _OUTAGE_MESSAGE if outage
+                    else _UNREADABLE_MESSAGE if unreadable
+                    else str(e)
+                ),
                 "errorIsOurs": outage,
                 "retryable": outage,
             })
