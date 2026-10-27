@@ -106,8 +106,11 @@ export default function LabApp({ enabled }: { enabled: boolean }) {
     setBudget(b);
   };
 
+  // Runway's links die after about a day. Drop old creations from view instead of showing them broken.
+  const visible = jobs.filter((j) => Date.now() - j.createdAt < 24 * 60 * 60 * 1000);
+
   const tray: TrayImage[] = [
-    ...jobs
+    ...visible
       .filter((j) => j.kind === "image" && j.status === "SUCCEEDED" && j.output?.[0])
       .map((j): TrayImage => ({ key: `j:${j.id}`, preview: j.output![0], kind: "job", jobId: j.id })),
     ...uploads,
@@ -156,13 +159,13 @@ export default function LabApp({ enabled }: { enabled: boolean }) {
       </p>
       <div className="mt-4 max-w-2xl rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-relaxed text-amber-900">
         <b>Save what you like.</b> Refreshing the page is safe: your list of creations comes back. But the files
-        themselves are only available for about 24 hours, after which they stop loading. Use <b>Open / save</b> under
+        themselves are only available for 24 hours, after which they disappear from this page. Use <b>Open / save</b> under
         anything you want to keep. Photos you upload yourself are not kept after a refresh.
       </div>
 
-      <ImageForm budget={budget} jobs={jobs} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
-      <VideoForm budget={budget} jobs={jobs} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
-      <Gallery jobs={jobs} />
+      <ImageForm budget={budget} jobs={visible} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
+      <VideoForm budget={budget} jobs={visible} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
+      <Gallery jobs={visible} />
     </Shell>
   );
 }

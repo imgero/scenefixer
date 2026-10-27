@@ -382,9 +382,19 @@ export async function getJob(sid: string, id: string): Promise<LabJob | null> {
   return d && d.sid === sid ? { ...d, id } : null;
 }
 
+/**
+ * Runway's output links stop working 24-48 hours after they are issued. Past
+ * the shorter bound a creation is left out of the list rather than shown as a
+ * broken image. The job document stays: it is the record of what was spent.
+ */
+export const OUTPUT_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 export async function listJobs(sid: string): Promise<LabJob[]> {
   const snap = await jobs().where("sid", "==", sid).get();
-  const all = snap.docs.map((d) => ({ ...(d.data() as Omit<LabJob, "id">), id: d.id }));
+  const cutoff = Date.now() - OUTPUT_LIFETIME_MS;
+  const all = snap.docs
+    .map((d) => ({ ...(d.data() as Omit<LabJob, "id">), id: d.id }))
+    .filter((j) => j.createdAt > cutoff);
   all.sort((a, b) => b.createdAt - a.createdAt);
   return all.slice(0, 60);
 }
