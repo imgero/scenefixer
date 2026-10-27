@@ -149,7 +149,7 @@ export const VIDEO_MODELS: VideoModel[] = [
     runwayModel: "seedance2_5",
     label: "Seedance 2.5 (720p)",
     maker: "ByteDance",
-    blurb: "Best quality here. Sound included. Can hold several reference images of the same characters.",
+    blurb: "Best quality here, sound included, holds several reference images. Refuses images of realistic people (not charged if it does).",
     creditsPerSecond: 30,
     audioExtraPerSecond: 0,
     hasAudio: true,
