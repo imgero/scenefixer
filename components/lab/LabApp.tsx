@@ -91,6 +91,10 @@ export default function LabApp({ enabled }: { enabled: boolean }) {
         if (r.ok) {
           setJobs((cur) => cur.map((c) => (c.id === j.id ? r.data.job : c)));
           setBudget(r.data.budget);
+        } else if (r.status === 404) {
+          setJobs((cur) =>
+            cur.map((c) => (c.id === j.id ? { ...c, done: true, status: "FAILED", error: "This one was lost on our side. Please run it again." } : c)),
+          );
         }
       }
     }, 5000);
@@ -148,12 +152,16 @@ export default function LabApp({ enabled }: { enabled: boolean }) {
       {budget && <Meter budget={budget} />}
       <p className="mt-6 max-w-2xl text-[15px] leading-relaxed text-gray-600">
         Make a picture, then turn it into a video, or go straight to video. Every button shows what it costs before you
-        press it. Your credits are shared across everything below and don&apos;t refill. Finished files are kept about a
-        day, so save what you like.
+        press it. Your credits are shared across everything below and don&apos;t refill.
       </p>
+      <div className="mt-4 max-w-2xl rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-relaxed text-amber-900">
+        <b>Save what you like.</b> Refreshing the page is safe: your list of creations comes back. But the files
+        themselves are only available for about 24 hours, after which they stop loading. Use <b>Open / save</b> under
+        anything you want to keep. Photos you upload yourself are not kept after a refresh.
+      </div>
 
-      <ImageForm budget={budget} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
-      <VideoForm budget={budget} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
+      <ImageForm budget={budget} jobs={jobs} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
+      <VideoForm budget={budget} jobs={jobs} tray={tray} onCreated={onCreated} onUpload={(t) => setUploads((u) => [...u, t])} />
       <Gallery jobs={jobs} />
     </Shell>
   );
@@ -373,6 +381,7 @@ function toggle(list: string[], key: string, max: number): string[] {
 
 type FormProps = {
   budget: Budget | null;
+  jobs: Job[];
   tray: TrayImage[];
   onCreated: (j: Job, b: Budget) => void;
   onUpload: (t: TrayImage) => void;
@@ -400,7 +409,7 @@ function SubmitRow({ cost, budget, busy, error, label }: { cost: number; budget:
   );
 }
 
-function ImageForm({ budget, tray, onCreated, onUpload }: FormProps) {
+function ImageForm({ budget, jobs, tray, onCreated, onUpload }: FormProps) {
   const [modelId, setModelId] = useState(IMAGE_MODELS[0].id);
   const [aspect, setAspect] = useState<AspectRatio>("16:9");
   const [prompt, setPrompt] = useState("");
@@ -469,12 +478,13 @@ function ImageForm({ budget, tray, onCreated, onUpload }: FormProps) {
           />
         </div>
         <SubmitRow cost={imageCost(m)} budget={budget} busy={busy} error={error} label="Make image" />
+        <Latest jobs={jobs} kind="image" />
       </form>
     </Section>
   );
 }
 
-function VideoForm({ budget, tray, onCreated, onUpload }: FormProps) {
+function VideoForm({ budget, jobs, tray, onCreated, onUpload }: FormProps) {
   const [modelId, setModelId] = useState(VIDEO_MODELS[0].id);
   const [aspect, setAspect] = useState<AspectRatio>("16:9");
   const [seconds, setSeconds] = useState(VIDEO_MODELS[0].durations[0]);
@@ -599,59 +609,92 @@ function VideoForm({ budget, tray, onCreated, onUpload }: FormProps) {
           />
         </div>
         <SubmitRow cost={cost} budget={budget} busy={busy} error={error} label="Make video" />
+        <Latest jobs={jobs} kind="video" />
       </form>
     </Section>
   );
 }
 
-function Gallery({ jobs }: { jobs: Job[] }) {
+const SLOW_AFTER_S: Record<string, number> = { image: 90, gen4_turbo: 90, gen4_5: 240, veo3_1_fast: 240, seedance_2_5: 480 };
+const ETA: Record<string, string> = {
+  image: "usually under a minute",
+  gen4_turbo: "usually about half a minute",
+  gen4_5: "usually 1–2 minutes",
+  veo3_1_fast: "usually 1–2 minutes",
+  seedance_2_5: "usually 4–5 minutes",
+};
+
+function JobCard({ j }: { j: Job }) {
   const now = useNow(1000);
+  const label = (j.kind === "image" ? imageModel(j.modelId) : videoModel(j.modelId))?.label ?? j.modelId;
+  const url = j.output?.[0];
+  const running = !j.done;
+  const elapsed = Math.max(0, Math.round((now - j.createdAt) / 1000));
+  const slow = running && elapsed > (SLOW_AFTER_S[j.kind === "image" ? "image" : j.modelId] ?? 240);
+  return (
+    <div className="overflow-hidden rounded-xl border border-gray-200">
+      <div className={`relative flex items-center justify-center bg-gray-50 ${j.aspect === "16:9" ? "aspect-video" : "aspect-[9/16] max-h-[420px]"} w-full`}>
+        {j.status === "SUCCEEDED" && url ? (
+          j.kind === "video" ? (
+            <video src={url} controls loop playsInline className="h-full w-full bg-black object-contain" />
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={url} alt={j.prompt} className="h-full w-full object-contain" />
+          )
+        ) : running ? (
+          <div className="px-6 text-center text-sm text-gray-500">
+            <div className="mx-auto mb-2 h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-black" />
+            Working on it… {ETA[j.kind === "image" ? "image" : j.modelId]}
+            <div className="text-xs text-gray-400">{elapsed}s so far</div>
+            {slow && (
+              <div className="mt-2 text-xs text-amber-700">
+                Taking longer than usual, but it&apos;s still running. You&apos;re only charged if it succeeds, so you can leave this page and come back.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="px-6 text-center text-sm text-red-600">{j.error ?? "This one didn't work."}</div>
+        )}
+      </div>
+      <div className="space-y-1 p-3 text-sm">
+        <div className="flex items-baseline justify-between">
+          <span className="font-medium">{label}</span>
+          <span className="tabular-nums text-gray-500">
+            {j.status === "SUCCEEDED" ? `${fmt(j.charged ?? j.estimate)} cr` : j.done ? "0 cr (not charged)" : `${fmt(j.estimate)} cr held`}
+          </span>
+        </div>
+        <p className="line-clamp-2 text-gray-500">{j.prompt}</p>
+        {j.status === "SUCCEEDED" && url && (
+          <a href={url} target="_blank" rel="noreferrer" className="inline-block pt-1 text-black underline">
+            Open / save
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The newest generation of this kind, shown right under the button that started it. */
+function Latest({ jobs, kind }: { jobs: Job[]; kind: Job["kind"] }) {
+  const j = jobs.find((x) => x.kind === kind);
+  if (!j) return null;
+  return (
+    <div className="max-w-md pt-2">
+      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-gray-400">Latest {kind}</div>
+      <JobCard j={j} />
+    </div>
+  );
+}
+
+function Gallery({ jobs }: { jobs: Job[] }) {
   if (!jobs.length) return null;
   return (
     <section className="mt-12">
-      <h2 className="text-lg font-semibold">Your creations</h2>
+      <h2 className="text-lg font-semibold">Everything you&apos;ve made</h2>
       <div className="mt-4 grid gap-5 sm:grid-cols-2">
-        {jobs.map((j) => {
-          const label = (j.kind === "image" ? imageModel(j.modelId) : videoModel(j.modelId))?.label ?? j.modelId;
-          const url = j.output?.[0];
-          const running = !j.done;
-          return (
-            <div key={j.id} className="overflow-hidden rounded-xl border border-gray-200">
-              <div className={`relative flex items-center justify-center bg-gray-50 ${j.aspect === "16:9" ? "aspect-video" : "aspect-[9/16] max-h-[420px]"} w-full`}>
-                {j.status === "SUCCEEDED" && url ? (
-                  j.kind === "video" ? (
-                    <video src={url} controls loop playsInline className="h-full w-full bg-black object-contain" />
-                  ) : (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={url} alt={j.prompt} className="h-full w-full object-contain" />
-                  )
-                ) : running ? (
-                  <div className="text-center text-sm text-gray-500">
-                    <div className="mx-auto mb-2 h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-black" />
-                    {j.kind === "video" ? "Making your video… usually 1–3 minutes" : "Making your image…"}
-                    <div className="text-xs text-gray-400">{Math.max(0, Math.round((now - j.createdAt) / 1000))}s</div>
-                  </div>
-                ) : (
-                  <div className="px-6 text-center text-sm text-red-600">{j.error ?? "This one didn't work."}</div>
-                )}
-              </div>
-              <div className="space-y-1 p-3 text-sm">
-                <div className="flex items-baseline justify-between">
-                  <span className="font-medium">{label}</span>
-                  <span className="tabular-nums text-gray-500">
-                    {j.status === "SUCCEEDED" ? `${fmt(j.charged ?? j.estimate)} cr` : j.done ? "0 cr (not charged)" : `${fmt(j.estimate)} cr held`}
-                  </span>
-                </div>
-                <p className="line-clamp-2 text-gray-500">{j.prompt}</p>
-                {j.status === "SUCCEEDED" && url && (
-                  <a href={url} target="_blank" rel="noreferrer" className="inline-block pt-1 text-black underline">
-                    Open / save
-                  </a>
-                )}
-              </div>
-            </div>
-          );
-        })}
+        {jobs.map((j) => (
+          <JobCard key={j.id} j={j} />
+        ))}
       </div>
     </section>
   );
