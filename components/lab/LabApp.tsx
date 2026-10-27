@@ -627,8 +627,15 @@ const ETA: Record<string, string> = {
   seedance_2_5: "usually 4–5 minutes",
 };
 
+function timeLeft(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60000));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+}
+
 function JobCard({ j }: { j: Job }) {
   const now = useNow(1000);
+  // Counted from when the job was created, a little earlier than when Runway issued the link, so it errs on the safe side.
+  const left = j.createdAt + 24 * 60 * 60 * 1000 - now;
   const label = (j.kind === "image" ? imageModel(j.modelId) : videoModel(j.modelId))?.label ?? j.modelId;
   const url = j.output?.[0];
   const running = !j.done;
@@ -668,9 +675,14 @@ function JobCard({ j }: { j: Job }) {
         </div>
         <p className="line-clamp-2 text-gray-500">{j.prompt}</p>
         {j.status === "SUCCEEDED" && url && (
-          <a href={url} target="_blank" rel="noreferrer" className="inline-block pt-1 text-black underline">
-            Open / save
-          </a>
+          <div className="flex items-center justify-between pt-1">
+            <a href={url} target="_blank" rel="noreferrer" className="text-black underline">
+              Open / save
+            </a>
+            <span className={`text-xs ${left < 3 * 60 * 60 * 1000 ? "font-medium text-red-600" : "text-gray-400"}`}>
+              Disappears in {timeLeft(left)}
+            </span>
+          </div>
         )}
       </div>
     </div>
