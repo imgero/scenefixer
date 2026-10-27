@@ -5,7 +5,7 @@ export default function robots(): MetadataRoute.Robots {
     rules: {
       userAgent: "*",
       allow: "/",
-      disallow: ["/api/", "/job/", "/jobs"],
+      disallow: ["/api/", "/job/", "/jobs", "/lab"],
     },
     sitemap: "https://scenefixer.com/sitemap.xml",
   };

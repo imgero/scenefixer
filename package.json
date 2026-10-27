@@ -12,7 +12,7 @@
     "@anthropic-ai/sdk": "^0.52.0",
     "@paralleldrive/cuid2": "^2.2.2",
     "@phosphor-icons/react": "^2.1.10",
-    "@runwayml/sdk": "^3.21.0",
+    "@runwayml/sdk": "^4.24.0",
     "clsx": "^2.1.1",
     "firebase": "^11.7.1",
     "firebase-admin": "^13.4.0",
