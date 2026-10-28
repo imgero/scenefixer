@@ -24,6 +24,12 @@ export async function triggerProcessJob(jobId: string) {
   return callModal(process.env.MODAL_PROCESS_JOB_URL!, { jobId });
 }
 
+// Same endpoint as a new scan; deepScan makes it skip decompose and re-run
+// detection on the existing shots.
+export async function triggerDeepScan(jobId: string) {
+  return callModal(process.env.MODAL_PROCESS_JOB_URL!, { jobId, deepScan: true });
+}
+
 export async function triggerFixPhase(jobId: string) {
   return callModal(process.env.MODAL_FIX_PHASE_URL!, { jobId });
 }

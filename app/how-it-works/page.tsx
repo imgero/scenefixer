@@ -60,8 +60,8 @@ export default function HowItWorksPage() {
             Scene Fixer is the continuity supervisor for AI video. It splits your sequence
             into shots, uses Claude to look for inconsistencies — wardrobe, lighting,
             props, eyeline — then inpaints each fix frame-by-frame with Runway Aleph.
-            Free scans use Claude Haiku, a smaller and weaker model; with credits, every
-            scan uses Claude Opus. Works on output from any AI video model. Here&apos;s exactly what
+            Free scans use Claude Haiku, a smaller and weaker model; the deep scan, for
+            1 credit per shot, uses Claude Opus. Works on output from any AI video model. Here&apos;s exactly what
             happens under the hood.
           </p>
         </div>
@@ -143,8 +143,8 @@ export default function HowItWorksPage() {
             <a href="https://www.anthropic.com/claude/haiku" target="_blank" rel="noopener noreferrer"
               className="font-medium underline underline-offset-2">Claude Haiku</a>,
             a smaller, faster and weaker model. It is a quick check: it can miss errors
-            and it stops at a fixed amount of work per video. While your account holds
-            credits, every scan is the <strong>deep scan</strong> on{" "}
+            and it stops at a fixed amount of work per video. After it, you can run the{" "}
+            <strong>deep scan</strong> for 1 credit per shot, on{" "}
             <a href="https://www.anthropic.com/claude/opus" target="_blank" rel="noopener noreferrer"
               className="font-medium underline underline-offset-2">Claude Opus</a>,
             Anthropic&apos;s most capable model.
@@ -328,7 +328,7 @@ export default function HowItWorksPage() {
             {[
               ["Upload", "Firebase Storage (signed URL, direct from browser)"],
               ["Shot detection", "PySceneDetect → 5 keyframes / shot"],
-              ["Error detection", "Claude vision — Haiku on free scans (lighter, can miss errors), Opus on the deep scan with credits"],
+              ["Error detection", "Claude vision — Haiku on free scans (lighter, can miss errors), Opus on the deep scan (1 credit per shot)"],
               ["User review", "Confirm each flag, mark the exact region, or add missed errors manually"],
               ["Inpainting", "Runway Gen-4 Aleph (per confirmed error, sequential)"],
               ["Verification", "Claude Opus 4.8 vision (per fixed clip)"],

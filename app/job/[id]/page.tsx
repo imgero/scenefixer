@@ -8,7 +8,7 @@ import { useJob } from "@/lib/hooks/useJob";
 import { useErrors } from "@/lib/hooks/useErrors";
 import { useAuth } from "@/lib/hooks/useAuth";
 import { auth } from "@/lib/firebase";
-import { PLAN_LIMITS, type Plan } from "@/lib/types";
+import { PLAN_LIMITS, DEEP_SCAN_CREDITS_PER_SHOT, type Plan } from "@/lib/types";
 import JobStatus from "@/components/JobStatus";
 import ErrorList from "@/components/ErrorList";
 import DiffPlayer from "@/components/DiffPlayer";
@@ -67,6 +67,8 @@ export default function JobPage({ params }: Props) {
   const [betaToken, setBetaToken] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
+  const [deepScanning, setDeepScanning] = useState(false);
+  const [deepScanError, setDeepScanError] = useState<string | null>(null);
 
   // Load beta token from localStorage
   useEffect(() => {
@@ -203,6 +205,32 @@ export default function JobPage({ params }: Props) {
     job?.scoreAfter !== undefined &&
     job?.verificationPassed !== false &&
     job?.scoreAfterReliable !== false;
+
+  // Priced from the shots the quick scan already found, the same count the
+  // deep-scan route charges for, so the number on the button is the charge.
+  const deepScanCost =
+    shots.filter((s) => !s.isBlank).length * DEEP_SCAN_CREDITS_PER_SHOT;
+
+  const handleDeepScan = async () => {
+    setDeepScanError(null);
+    setDeepScanning(true);
+    posthog.capture("deep_scan_clicked", { job_id: jobId, credits: deepScanCost });
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch(`/api/jobs/${jobId}/deep-scan`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setDeepScanError(data.error ?? "The deep scan couldn't start. Please try again.");
+      }
+    } catch {
+      setDeepScanError("The deep scan couldn't start. Please try again.");
+    } finally {
+      setDeepScanning(false);
+    }
+  };
 
   const monthlyLimit = PLAN_LIMITS[userPlan].creditsPerMonth;
   const quotaExhausted = user ? (fixesUsed >= monthlyLimit && creditsBalance <= 0) : false;
@@ -395,10 +423,15 @@ export default function JobPage({ params }: Props) {
       {/* Free scan notice. A free scan runs on Claude Haiku with a hard cost
           cap (modal_app/detect.py), and says so rather than letting its
           findings pass for the Opus deep scan. */}
-      {job.scanTier === "free" && job.scoreBefore !== undefined && (
+      {job.scanTier === "free" &&
+        job.scoreBefore !== undefined &&
+        job.status === "awaiting_confirmation" && (
         <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          {job.deepScanRefunded && job.deepScanError && (
+            <p className="text-xs text-amber-900 font-semibold mb-2">{job.deepScanError}</p>
+          )}
           <p className="text-sm text-amber-900 font-semibold mb-1">
-            This was a free scan with Claude Haiku
+            This was a free quick scan with Claude Haiku
           </p>
           <p className="text-xs text-amber-800">
             Haiku is a smaller and weaker model than the one our deep scan uses, so
@@ -406,15 +439,39 @@ export default function JobPage({ params }: Props) {
             {job.scanBudgetHit
               ? " This video was also too long for a full free scan, so part of it was not checked."
               : ""}{" "}
-            With credits on your account, every scan is the deep scan with Claude Opus.
+            A deep scan re-checks this video with Claude Opus for{" "}
+            <b>
+              {DEEP_SCAN_CREDITS_PER_SHOT} credit per shot
+              {deepScanCost > 0 ? `, ${deepScanCost} credits here` : ""}
+            </b>
+            . Its findings replace the ones below.
           </p>
-          <Link
-            href="/pricing"
-            className="inline-block mt-2 text-xs font-semibold text-amber-900 underline underline-offset-2 hover:opacity-70"
-            onClick={() => posthog.capture("deep_scan_clicked", { job_id: jobId })}
-          >
-            Get the deep scan →
-          </Link>
+          {user && deepScanCost > 0 && creditsBalance >= deepScanCost ? (
+            <button
+              onClick={handleDeepScan}
+              disabled={deepScanning}
+              className="inline-block mt-2 text-xs font-semibold text-amber-900 underline underline-offset-2 hover:opacity-70 disabled:opacity-50"
+            >
+              {deepScanning ? "Starting…" : `Deep scan this video for ${deepScanCost} credits →`}
+            </button>
+          ) : (
+            <Link
+              href="/pricing"
+              className="inline-block mt-2 text-xs font-semibold text-amber-900 underline underline-offset-2 hover:opacity-70"
+              onClick={() =>
+                posthog.capture("deep_scan_buy_clicked", {
+                  job_id: jobId,
+                  credits: deepScanCost,
+                  balance: creditsBalance,
+                })
+              }
+            >
+              {user && creditsBalance > 0
+                ? `You have ${creditsBalance} credits. Buy more for a deep scan →`
+                : "Buy credits for a deep scan →"}
+            </Link>
+          )}
+          {deepScanError && <p className="mt-2 text-xs text-red-700">{deepScanError}</p>}
         </div>
       )}
 

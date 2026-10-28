@@ -463,7 +463,7 @@ export default function DropZone() {
 
       <p className="text-center text-[11px] text-gray-500">
         Free scans use Claude Haiku, a smaller and weaker model that can miss errors.
-        Accounts with credits get the full deep scan with Claude Opus.
+        After it, you can deep scan with Claude Opus for 1 credit per shot.
       </p>
 
       <p className="text-center text-[11px] text-gray-400">
