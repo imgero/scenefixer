@@ -56,6 +56,16 @@ export type Job = {
    * 12 Oct, which were all Opus.
    */
   scanTier?: "free" | "paid";
+  /**
+   * Credits charged for an Opus deep scan the owner asked for on this job
+   * (DEEP_SCAN_CREDITS_PER_SHOT per analysed shot). Its presence is what makes
+   * tier_for_job pick Opus; holding credits alone no longer does.
+   */
+  deepScanCredits?: number;
+  /** The deep scan failed before finishing and its credits were returned. */
+  deepScanRefunded?: boolean;
+  /** What to tell the owner when a deep scan failed and was rolled back. */
+  deepScanError?: string;
   /** A free scan hit its cost cap and skipped the rest of its comparisons. */
   scanBudgetHit?: boolean;
   /** Seconds of the video actually analysed. */
@@ -95,6 +105,8 @@ export type Shot = {
   endMs: number;
   keyframeUrl: string;
   keyframeUrls?: string[];
+  /** No usable picture; detection skips it, so a deep scan doesn't charge for it. */
+  isBlank?: boolean;
 };
 
 export type ErrorType =
@@ -216,13 +228,21 @@ export const FREE_ANALYSIS_SECONDS: Record<Plan, number> = {
 /**
  * Scans per day for a free-plan account.
  *
- * 1 for an account with no purchased credits; those scans run on Haiku with
- * a hard $0.20 cap (FREE_SCAN_BUDGET_USD in modal_app/detect.py). An account
- * holding purchased credits scans on Opus at full price, so it gets more, but
- * still a limit: a $10 pack must not buy unlimited $3-5 scans.
+ * Every upload is a quick scan on Haiku with a hard $0.20 cap
+ * (FREE_SCAN_BUDGET_USD in modal_app/detect.py). Credit holders get a few
+ * more of them a day; the Opus deep scan is separate and paid per shot.
  */
 export const FREE_SCANS_PER_DAY = 1;
 export const CREDIT_HOLDER_SCANS_PER_DAY = 3;
+
+/**
+ * Credits an Opus deep scan costs per analysed (non-blank) shot.
+ *
+ * Deep scans used to be free to anyone holding credits: on 24 Oct a $10 buyer
+ * got an 11-shot Opus scan that cost us $3.92 and spent none of his credits.
+ * Opus runs about $0.36 a shot; one credit sells for $0.53–0.67.
+ */
+export const DEEP_SCAN_CREDITS_PER_SHOT = 1;
 
 export const PLAN_LIMITS: Record<Plan, {
   creditsPerMonth: number;  // seconds of Runway output included per month

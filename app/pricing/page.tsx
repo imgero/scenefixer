@@ -155,7 +155,7 @@ function PricingContent() {
             Scanning your video is always free. You only pay when you actually fix something.
           </p>
           <p className="text-sm text-gray-400">
-            <span className="text-black font-semibold">1 credit = 1 second</span> of fixed output · Max 8 fixes per upload · Refund if a fix doesn&apos;t land
+            <span className="text-black font-semibold">1 credit = 1 second</span> of the shot being fixed · Max 8 fixes per upload · Credits back if a fix doesn&apos;t land
           </p>
 
         </div>
@@ -202,10 +202,25 @@ function PricingContent() {
           <div className="mb-5">
             <h3 className="font-semibold text-black text-base mb-1">Buy credits to fix</h3>
             <p className="text-sm text-gray-500">
-              Fixing uses credits. While you hold credits, every scan is the
-              full deep scan with Claude Opus. Output is 720p with no watermark, and a fix that
+              Credits pay for fixes, and for a deep scan with Claude Opus when you
+              want one: 1 credit per shot. Output is 720p with no watermark, and a fix that
               doesn&apos;t land is refunded automatically. Credits never expire
               and there is nothing to cancel.
+            </p>
+          </div>
+
+          {/* Stated because a buyer read "1 credit = 1 second" as cheap: on 24 Oct
+              someone bought 15 credits before scanning, picked 6 fixes, and was
+              told they needed 75. Each fix is charged its whole target shot. */}
+          <div className="mb-5 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-600">
+            <p className="font-medium text-black mb-1">How much a fix costs</p>
+            <p>
+              Each fix uses one credit per second of the shot it repairs, however small the
+              mistake. Fixing errors in shots of 5, 8 and 12 seconds uses 25 credits.
+            </p>
+            <p className="mt-2">
+              Most shots run 5–15 seconds, so 15 credits usually covers one or two fixes.
+              Scan first, it&apos;s free, to see your shots before you buy.
             </p>
           </div>
 
@@ -232,7 +247,10 @@ function PricingContent() {
           </div>
 
           <p className="text-[11px] text-gray-400 text-center mt-4">
-            One-time · never expire · no subscription required
+            One-time · never expire · no subscription required ·{" "}
+            <Link href="/legal/refunds" className="underline underline-offset-2 hover:text-black">
+              unused packs refundable for 14 days
+            </Link>
           </p>
         </div>
 

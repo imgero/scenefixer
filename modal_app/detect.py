@@ -135,22 +135,13 @@ def free_tier(budget_usd: float | None = FREE_SCAN_BUDGET_USD) -> ScanTier:
 
 def tier_for_job(job_doc: dict) -> ScanTier:
     """
-    Paid when the owner is on a paid plan or holds purchased credits.
+    Paid only for a deep scan the owner bought on this job.
 
-    Anything that cannot be confirmed — no owner (an anonymous beta scan), a
-    missing user document, a read that fails — scans free. The failure mode
-    of guessing wrong is then a cheaper scan, never an uncapped one.
+    /api/jobs/[id]/deep-scan writes deepScanCredits after taking the credits.
+    Holding credits used to be enough, which gave every credit holder Opus
+    scans for nothing (24 Oct: $3.92 on one 11-shot video, no credits spent).
     """
-    uid = job_doc.get("ownerUid")
-    if not uid:
-        return free_tier()
-    try:
-        user = get_db().collection("users").document(uid).get().to_dict() or {}
-    except Exception as exc:
-        print(f"tier_for_job: could not read user {uid} ({exc}); scanning free")
-        return free_tier()
-    paid = (user.get("plan") or "free") != "free" or (user.get("creditsBalance") or 0) > 0
-    return paid_tier() if paid else free_tier()
+    return paid_tier() if job_doc.get("deepScanCredits") else free_tier()
 
 
 def tier_for_verify(job_doc: dict) -> ScanTier:
@@ -1094,10 +1085,18 @@ def run_detect(job_id: str) -> int:
         except Exception as exc:
             # One comparison failing must not lose the other fifty-five.
             print(f"Detection task {idx} failed ({type(exc).__name__}: {exc})")
+            failures.append(exc)
             return idx, sa, sb, []
 
+    failures: list[Exception] = []
     with ThreadPoolExecutor(max_workers=DETECT_CONCURRENCY) as pool:
         results = sorted(pool.map(_run, enumerate(tasks)), key=lambda r: r[0])
+
+    # Every call failing is an outage, not a clean video. Finishing would show
+    # a perfect score, keep a paid deep scan's credits and count a free scan;
+    # raising sends it through run_process_job's refund and outage handling.
+    if tasks and len(failures) == len(tasks):
+        raise failures[-1]
 
     shot_index = {shot["id"]: i for i, shot in enumerate(shots)}
     dropped_far = 0

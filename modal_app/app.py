@@ -133,8 +133,79 @@ ANALYSIS_SECRETS = [
 ]
 
 
+_DEEP_SCAN_FAILED_MESSAGE = (
+    "The deep scan didn't finish. Your credits have been returned and your "
+    "quick scan results are back."
+)
+
+
+def _move_errors(job_id: str, src: str, dst: str) -> int:
+    """Move every document in one errors subcollection of a job to another."""
+    from modal_app.firebase import get_db
+
+    job_ref = get_db().collection("jobs").document(job_id)
+    docs = list(job_ref.collection(src).stream())
+    for i in range(0, len(docs), 200):
+        batch = get_db().batch()
+        for d in docs[i:i + 200]:
+            batch.set(job_ref.collection(dst).document(d.id), d.to_dict())
+            batch.delete(d.reference)
+        batch.commit()
+    return len(docs)
+
+
+def _run_deep_scan(job_id: str):
+    """
+    Re-run detection on Opus over a finished quick scan's shots.
+
+    The credits were taken by /api/jobs/[id]/deep-scan, which also set
+    deepScanCredits (what makes tier_for_job pick Opus). The quick scan's
+    findings are set aside rather than deleted: run_detect scores every error
+    in the collection, so they cannot stay, but a failed deep scan must leave
+    the user with what they had, plus their credits.
+    """
+    from modal_app.detect import run_detect
+    from modal_app.firebase import get_db
+    from google.cloud.firestore_v1 import DELETE_FIELD, Increment
+
+    _move_errors(job_id, "errors", "quickScanErrors")
+    try:
+        run_detect(job_id)
+    except Exception as e:
+        job_ref = get_db().collection("jobs").document(job_id)
+        job = job_ref.get().to_dict() or {}
+        credits = int(job.get("deepScanCredits") or 0)
+        for d in job_ref.collection("errors").stream():
+            d.reference.delete()
+        _move_errors(job_id, "quickScanErrors", "errors")
+        if credits and job.get("ownerUid"):
+            get_db().collection("users").document(job["ownerUid"]).update(
+                {"creditsBalance": Increment(credits)}
+            )
+        job_ref.update({
+            "status": "awaiting_confirmation",
+            "scanTier": "free",
+            "deepScanCredits": DELETE_FIELD,
+            "deepScanRefunded": True,
+            "deepScanError": _DEEP_SCAN_FAILED_MESSAGE,
+        })
+        from modal_app import analytics
+        analytics.capture(
+            job_id,
+            "deep_scan_failed",
+            {
+                "failure_reason": str(e),
+                "exception_type": type(e).__name__,
+                "credits_refunded": credits,
+                "upstream_outage": _is_upstream_outage(e),
+            },
+            job=job,
+        )
+        raise
+
+
 @app.function(image=image, secrets=ANALYSIS_SECRETS, timeout=7200, min_containers=0)
-def run_process_job(job_id: str):
+def run_process_job(job_id: str, deep_scan: bool = False):
     """
     Decompose → Detect. A plain function, not a web endpoint, so it can be
     spawned detached and survive its caller going away.
@@ -153,6 +224,10 @@ def run_process_job(job_id: str):
     from modal_app import analytics
 
     analytics.start_timer(job_id)
+
+    if deep_scan:
+        _run_deep_scan(job_id)
+        return {"ok": True}
 
     try:
         from modal_app.decompose import run_decompose
@@ -583,7 +658,7 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
     if not job_id:
         raise HTTPException(status_code=400, detail="jobId required")
 
-    call = run_process_job.spawn(job_id)
+    call = run_process_job.spawn(job_id, deep_scan=bool(body.get("deepScan")))
     return {"ok": True, "spawned": True, "callId": call.object_id}
 
 
