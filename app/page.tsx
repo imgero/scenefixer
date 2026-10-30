@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import DropZone, { activateBetaMode } from "@/components/DropZone";
+import DropZone from "@/components/DropZone";
 import { useAuth } from "@/lib/hooks/useAuth";
 import type { RecentJob } from "@/lib/types";
 import {
@@ -82,8 +82,6 @@ export default function HomePage() {
   const { user, loading } = useAuth();
   const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
   const [showAnnouncement, setShowAnnouncement] = useState(true);
-  const [betaKey, setBetaKey] = useState(0);
-  const [betaActive, setBetaActive] = useState(false);
 
   useEffect(() => {
     try {
@@ -91,14 +89,7 @@ export default function HomePage() {
       setRecentJobs(stored);
     } catch { /* ignore */ }
     if (sessionStorage.getItem("sf_announce_hidden")) setShowAnnouncement(false);
-    if (localStorage.getItem("sf_beta_mode") === "1") setBetaActive(true);
   }, []);
-
-  const handleBetaActivate = () => {
-    activateBetaMode();
-    setBetaActive(true);
-    setBetaKey((k) => k + 1);
-  };
 
   const hideAnnouncement = () => {
     setShowAnnouncement(false);
@@ -174,18 +165,7 @@ export default function HomePage() {
 
         {/* Right: drop zone */}
         <div className="w-full lg:w-[480px] shrink-0">
-          <DropZone key={betaKey} />
-
-          {!loading && !user && !betaActive && (
-            <div className="mt-3 text-center">
-              <button
-                onClick={handleBetaActivate}
-                className="text-xs text-gray-400 hover:text-black underline underline-offset-2 transition-colors"
-              >
-                Beta tester? Try without signing in →
-              </button>
-            </div>
-          )}
+          <DropZone />
 
           {recentJobs.length > 0 && (
             <div className="mt-5">

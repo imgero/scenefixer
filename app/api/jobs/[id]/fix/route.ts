@@ -82,12 +82,6 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: jobId } = await params;
-  const betaToken = req.headers.get("X-Beta-Token");
-
-  if (betaToken && !req.headers.get("Authorization")) {
-    return handleBetaFix(jobId, betaToken);
-  }
-
   const uid = await getUidFromRequest(req);
 
   // Server-side proof the request arrived. `fix_requested` is client-side, so
@@ -378,30 +372,4 @@ export async function POST(
     });
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
-}
-
-async function handleBetaFix(jobId: string, betaToken: string) {
-  const distinctId = `beta_${betaToken.slice(0, 8)}`;
-
-  await captureServer({
-    distinctId,
-    event: "fix_request_received",
-    properties: { job_id: jobId, authenticated: false, is_beta: true },
-  });
-
-  // Beta testers can scan without an account, but fixing is paid now, and
-  // paying needs an account to hold the credits. The free beta fix was the
-  // last way to fix without credits.
-  await captureServer({
-    distinctId,
-    event: "fix_rejected",
-    properties: { job_id: jobId, reason: "beta_fix_disabled", http_status: 402, is_beta: true },
-  });
-  return NextResponse.json(
-    {
-      error: "Sign in and buy credits to fix these errors. Scanning stays free.",
-      code: "credits_required",
-    },
-    { status: 402 }
-  );
 }

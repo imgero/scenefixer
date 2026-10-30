@@ -23,11 +23,11 @@ service cloud.firestore {
         allow read: if jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data)
           || jobIsPublicOrBeta(get(/databases/$(database)/documents/jobs/$(jobId)).data);
 
+        // Owner only. Every job is created isPublic, so allowing public jobs
+        // here let anyone, signed in or not, change which errors another
+        // person's Fix would spend their credits on.
         allow update: if (
-          (
-            jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data)
-            || jobIsPublicOrBeta(get(/databases/$(database)/documents/jobs/$(jobId)).data)
-          ) &&
+          jobIsOwned(get(/databases/$(database)/documents/jobs/$(jobId)).data) &&
           request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['userConfirmed', 'fixDirection', 'fixMode', 'replaceWith', 'fixStatus'])
           && (

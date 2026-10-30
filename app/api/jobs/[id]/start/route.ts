@@ -13,7 +13,6 @@ export async function POST(
   const { id: jobId } = await params;
 
   const authHeader = req.headers.get("Authorization");
-  const betaToken = req.headers.get("X-Beta-Token");
 
   let uid: string | null = null;
 
@@ -24,7 +23,7 @@ export async function POST(
     } catch {
       return NextResponse.json({ error: "Invalid token" }, { status: 401 });
     }
-  } else if (!betaToken) {
+  } else {
     return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
   }
 
@@ -34,8 +33,7 @@ export async function POST(
 
     const jobData = jobSnap.data()!;
     const isOwner = uid && jobData.ownerUid === uid;
-    const isBetaOwner = betaToken && jobData.betaToken === betaToken;
-    if (!isOwner && !isBetaOwner) {
+    if (!isOwner) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
@@ -84,9 +82,9 @@ export async function POST(
     // frozen instance loses the event. captureServer flushes before resolving
     // and stamps the event at capture time rather than at ingestion.
     await captureServer({
-      distinctId: uid ?? `beta_${betaToken?.slice(0, 8)}`,
+      distinctId: uid!,
       event: "job_analysis_started",
-      properties: { job_id: jobId, is_beta: !uid },
+      properties: { job_id: jobId, is_beta: false },
     });
 
     // Use after() so Vercel keeps the background fetch alive after the

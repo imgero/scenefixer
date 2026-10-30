@@ -18,7 +18,6 @@ export async function POST(
   { params }: { params: Promise<{ id: string; errorId: string }> }
 ) {
   const { id: jobId, errorId } = await params;
-  const betaToken = req.headers.get("X-Beta-Token");
   const uid = await getUid(req);
 
   // Verify ownership
@@ -26,8 +25,7 @@ export async function POST(
   if (!jobSnap.exists) return NextResponse.json({ error: "Job not found" }, { status: 404 });
   const jobData = jobSnap.data()!;
   const isOwner = uid && jobData.ownerUid === uid;
-  const isBeta = betaToken && jobData.betaToken === betaToken;
-  if (!isOwner && !isBeta) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  if (!isOwner) return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
 
   // Validate error state — must have been retried at least once and still failed
   const errorRef = adminDb.collection("jobs").doc(jobId).collection("errors").doc(errorId);

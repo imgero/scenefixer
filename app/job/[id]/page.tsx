@@ -64,19 +64,10 @@ export default function JobPage({ params }: Props) {
   const [userPlan, setUserPlan] = useState<Plan>("free");
   const [fixesUsed, setFixesUsed] = useState(0);
   const [creditsBalance, setCreditsBalance] = useState(0);
-  const [betaToken, setBetaToken] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   const [deepScanning, setDeepScanning] = useState(false);
   const [deepScanError, setDeepScanError] = useState<string | null>(null);
-
-  // Load beta token from localStorage
-  useEffect(() => {
-    const mode = localStorage.getItem("sf_beta_mode");
-    if (mode === "1") {
-      setBetaToken(localStorage.getItem("sf_beta_id"));
-    }
-  }, []);
 
   // Live-sync user plan + quota
   useEffect(() => {
@@ -241,13 +232,11 @@ export default function JobPage({ params }: Props) {
     posthog.capture("fix_requested", {
       job_id: jobId,
       confirmed_error_count: confirmedCount,
-      is_beta: !!betaToken,
     });
     try {
       const token = await auth.currentUser?.getIdToken();
       const headers: Record<string, string> = {};
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      else if (betaToken) headers["X-Beta-Token"] = betaToken;
 
       const res = await fetch(`/api/jobs/${jobId}/fix`, {
         method: "POST",
@@ -259,8 +248,6 @@ export default function JobPage({ params }: Props) {
           setFixError("Sign in to fix continuity errors.");
         } else if (data.code === "quota_exceeded") {
           setFixError(data.error + " Buy credits to fix these errors.");
-        } else if (data.code === "beta_used") {
-          setFixError("Your beta fix has already been used. Sign up free to get another fix!");
         } else {
           setFixError(data.error ?? "Fix failed. Please try again.");
         }
@@ -734,9 +721,9 @@ export default function JobPage({ params }: Props) {
                   ) : (
                     <button
                       onClick={handleFix}
-                      disabled={fixing || (!user && !betaToken)}
+                      disabled={fixing || !user}
                       className="px-5 py-2 rounded-xl bg-black hover:bg-gray-800 text-white font-semibold text-sm transition-colors disabled:opacity-50"
-                      title={(!user && !betaToken) ? "Sign in to fix errors" : undefined}
+                      title={!user ? "Sign in to fix errors" : undefined}
                     >
                       {fixing
                         ? "Starting…"
@@ -769,9 +756,9 @@ export default function JobPage({ params }: Props) {
             </div>
           )}
 
-          {!user && !betaToken && (job.status === "awaiting_confirmation" || job.status === "done") && (
+          {!user && (job.status === "awaiting_confirmation" || job.status === "done") && (
             <div className="mb-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-              <a href="/" className="font-semibold text-black hover:underline">Sign in</a> to apply fixes. Free plan includes 1 fix/month.
+              <a href="/" className="font-semibold text-black hover:underline">Sign in</a> and buy credits to apply fixes. Scanning stays free.
             </div>
           )}
 
@@ -788,7 +775,6 @@ export default function JobPage({ params }: Props) {
           jobId={jobId}
           shots={shots}
           onClose={() => setManualOpen(false)}
-          betaToken={betaToken}
         />
       )}
 
@@ -798,7 +784,6 @@ export default function JobPage({ params }: Props) {
           shots={shots}
           existingError={adjustingError}
           onClose={() => setAdjustingError(null)}
-          betaToken={betaToken}
         />
       )}
     </main>
