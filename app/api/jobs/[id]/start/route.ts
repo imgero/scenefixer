@@ -4,10 +4,7 @@ import { adminDb, adminAuth } from "@/lib/firebase-admin";
 import { triggerProcessJob } from "@/lib/modal";
 import { captureServer } from "@/lib/posthog-server";
 import { ensureEntitlement } from "@/lib/entitlements";
-// Single source of truth — the pricing page states this same number, and the
-// two drifting apart means the site promises one thing and the API enforces
-// another.
-import { FREE_SCANS_PER_DAY, CREDIT_HOLDER_SCANS_PER_DAY } from "@/lib/types";
+import { dailyScanStatus, scanLimitMessage } from "@/lib/scanLimit";
 
 export async function POST(
   req: NextRequest,
@@ -62,26 +59,12 @@ export async function POST(
       });
 
       if (ent.plan === "free") {
-        const today = new Date().toISOString().slice(0, 10);
-        const userSnap = await adminDb.collection("users").doc(uid).get();
-        const userData = userSnap.exists ? userSnap.data()! : {};
-        const scanDate = userData.scanDate ?? "";
-        const scansToday = scanDate === today ? (userData.scansToday ?? 0) : 0;
-        const dailyLimit =
-          ent.creditsBalance > 0 ? CREDIT_HOLDER_SCANS_PER_DAY : FREE_SCANS_PER_DAY;
-        if (scansToday >= dailyLimit) {
-          // No longer says "upgrade": there are no plans to upgrade to. The
-          // daily limit exists because analysis is the part that costs real
-          // money per run (Claude vision, billed to us on every scan, free
-          // ones included) — unlike fixes, which draw on a prepaid balance.
+        // Also checked in /api/jobs before the upload; checked again here
+        // because a retry reuses its job and skips that route.
+        const { today, scansToday, limit, reached } = await dailyScanStatus(uid, ent);
+        if (reached) {
           return NextResponse.json(
-            {
-              error:
-                dailyLimit === 1
-                  ? "That's your free scan for today. It resets at midnight UTC."
-                  : `That's your ${dailyLimit} scans for today. They reset at midnight UTC.`,
-              code: "scan_limit",
-            },
+            { error: scanLimitMessage(limit), code: "scan_limit" },
             { status: 429 }
           );
         }
