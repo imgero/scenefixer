@@ -15,7 +15,6 @@ type Props = {
   onClose: () => void;
   onCreated?: (errorId: string) => void;
   existingError?: ContinuityError;
-  betaToken?: string | null;
 };
 
 type Picked = {
@@ -40,7 +39,6 @@ export default function ManualMarker({
   onClose,
   onCreated,
   existingError,
-  betaToken,
 }: Props) {
   const adjusting = !!existingError;
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -138,7 +136,6 @@ export default function ManualMarker({
       const token = await auth.currentUser?.getIdToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      else if (betaToken) headers["X-Beta-Token"] = betaToken;
 
       const res = await fetch(`/api/jobs/${jobId}/manual-error`, {
         method: "POST",

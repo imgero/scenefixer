@@ -8,7 +8,6 @@ export async function DELETE(
   const { id: jobId, errorId } = await params;
 
   const authHeader = req.headers.get("Authorization");
-  const betaToken = req.headers.get("X-Beta-Token");
 
   let uid: string | null = null;
   if (authHeader?.startsWith("Bearer ")) {
@@ -27,8 +26,7 @@ export async function DELETE(
   const jobData = jobSnap.data()!;
 
   const isOwner = uid && jobData.ownerUid === uid;
-  const isBeta = betaToken && jobData.betaToken === betaToken;
-  if (!isOwner && !isBeta) {
+  if (!isOwner) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
   }
 

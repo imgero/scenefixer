@@ -75,10 +75,6 @@ function BBoxOverlay({ bbox }: { bbox: BBox }) {
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const token = await auth.currentUser?.getIdToken();
   if (token) return { Authorization: `Bearer ${token}` };
-  if (typeof window !== "undefined" && localStorage.getItem("sf_beta_mode") === "1") {
-    const betaId = localStorage.getItem("sf_beta_id");
-    if (betaId) return { "X-Beta-Token": betaId };
-  }
   return {};
 }
 

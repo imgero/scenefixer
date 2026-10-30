@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 import { auth } from "@/lib/firebase";
@@ -12,20 +12,6 @@ import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
 
 const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 const ACCEPTED = ["video/mp4", "video/quicktime"];
-
-function getBetaId(): string {
-  let id = localStorage.getItem("sf_beta_id");
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem("sf_beta_id", id);
-  }
-  return id;
-}
-
-export function activateBetaMode() {
-  getBetaId(); // ensure ID exists
-  localStorage.setItem("sf_beta_mode", "1");
-}
 
 export default function DropZone() {
   const router = useRouter();
@@ -42,7 +28,6 @@ export default function DropZone() {
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState("");
   const [signingIn, setSigningIn] = useState(false);
-  const [betaMode, setBetaMode] = useState(false);
   const busy = useRef(false);
   // The job a failed attempt created, kept so a retry of the same file
   // uploads into it instead of abandoning it. See handleFile.
@@ -54,9 +39,7 @@ export default function DropZone() {
     issuedAt: number;
   } | null>(null);
 
-  useEffect(() => {
-    setBetaMode(localStorage.getItem("sf_beta_mode") === "1");
-  }, []);
+
   const handleSignIn = async () => {
     posthog.capture("sign_in_clicked", { source: "dropzone" });
     setSigningIn(true);
@@ -74,12 +57,6 @@ export default function DropZone() {
     }
   };
 
-  const handleActivateBeta = () => {
-    activateBetaMode();
-    setBetaMode(true);
-    posthog.capture("beta_mode_activated", { source: "dropzone" });
-  };
-
   const handleFile = useCallback(
     async (file: File) => {
       setError(null);
@@ -95,10 +72,6 @@ export default function DropZone() {
       }
 
       const trimmedHint = hint.trim().slice(0, 500);
-      // A signed-in upload is never a beta one, even if beta mode was switched
-      // on before signing up: it stayed on, so every later upload was reported
-      // and stored as a beta job while the server treated it as the account's.
-      const betaId = betaMode && !auth.currentUser ? getBetaId() : null;
 
       // One upload at a time. On 29 Oct an Android phone fired the file
       // picker's change twice, 3 s apart: two jobs were created and one was
@@ -114,16 +87,13 @@ export default function DropZone() {
         const token = await auth.currentUser?.getIdToken();
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
-        else if (betaId) headers["X-Beta-Token"] = betaId;
 
         // 1. Create job + get signed upload URL — or, when this is a retry of
         // the same file, reuse the job the failed attempt already created.
         //
         // Every retry used to create a fresh job and abandon the last one in
         // "uploading" for good: 31 of the 38 stuck jobs by 29 Sep were followed
-        // by the same person trying again. A beta tester's one slot is claimed
-        // when the job is created, so a retry after a dropped connection was
-        // refused with "This beta slot has already been used".
+        // by the same person trying again.
         const fileKey = [file.name, file.size, file.lastModified, file.type, trimmedHint].join("|");
         const pending = pendingUpload.current;
         let jobId: string, uploadUrl: string, storagePath: string;
@@ -147,7 +117,7 @@ export default function DropZone() {
             // The request can land and create the job while the response is
             // lost — on 27 Sep a phone left a job with no upload attempt at
             // all, then created a second one 16 s later. Nothing recorded it.
-            posthog.capture("job_create_failed", { reason: "network", is_beta: !!betaId });
+            posthog.capture("job_create_failed", { reason: "network" });
             throw err;
           });
 
@@ -156,13 +126,8 @@ export default function DropZone() {
             posthog.capture("job_create_failed", {
               http_status: res.status,
               code: data.code ?? null,
-              is_beta: !!betaId,
             });
-            if (data.code === "pool_exhausted") {
-              setError("The beta pool is full. Sign up for free to continue!");
-            } else if (data.code === "already_used") {
-              setError("This beta slot has already been used. Sign up for free — it's quick!");
-            } else if (data.code === "scan_limit" && data.error) {
+            if (data.code === "scan_limit" && data.error) {
               setError(data.error);
             } else {
               setError("Upload failed. Please try again.");
@@ -191,7 +156,6 @@ export default function DropZone() {
           job_id: jobId,
           file_size_mb: sizeMb,
           file_type: file.type,
-          is_beta: !!betaId,
         });
 
         const reportUploadFailure = (reason: string, extra: Record<string, unknown> = {}) => {
@@ -201,7 +165,6 @@ export default function DropZone() {
             file_size_mb: sizeMb,
             file_type: file.type,
             elapsed_ms: Date.now() - uploadStartedAt,
-            is_beta: !!betaId,
             ...extra,
           });
         };
@@ -251,7 +214,6 @@ export default function DropZone() {
           job_id: jobId,
           file_size_mb: sizeMb,
           elapsed_ms: Date.now() - uploadStartedAt,
-          is_beta: !!betaId,
         });
 
         const encodedPath = encodeURIComponent(storagePath);
@@ -261,7 +223,6 @@ export default function DropZone() {
         // 3. Start pipeline
         const startHeaders: Record<string, string> = { "Content-Type": "application/json" };
         if (token) startHeaders["Authorization"] = `Bearer ${token}`;
-        else if (betaId) startHeaders["X-Beta-Token"] = betaId;
 
         const startRes = await fetch(`/api/jobs/${jobId}/start`, {
           method: "POST",
@@ -278,7 +239,6 @@ export default function DropZone() {
             http_status: startRes.status,
             code: startData.code ?? null,
             message: startData.error ?? null,
-            is_beta: !!betaId,
           });
           // Said as it is. Thrown, it fell through to "Upload failed. Please
           // try again." and people retried the same file into the same refusal.
@@ -294,8 +254,6 @@ export default function DropZone() {
         pendingUpload.current = null;
 
         // 4. Save to recent jobs in localStorage
-        if (betaId) localStorage.setItem("sf_beta_job", jobId);
-
         const recent = JSON.parse(localStorage.getItem("scenefixer_recent_jobs") || "[]");
         const updated = [
           { id: jobId, filename: file.name, createdAt: Date.now() },
@@ -308,7 +266,6 @@ export default function DropZone() {
           file_size_mb: Math.round(file.size / 1024 / 1024),
           file_type: file.type,
           has_hint: !!trimmedHint,
-          is_beta: !!betaId,
         });
 
         router.push(`/job/${jobId}`);
@@ -328,7 +285,7 @@ export default function DropZone() {
         busy.current = false;
       }
     },
-    [router, hint, betaMode]
+    [router, hint]
   );
 
   const onDrop = useCallback(
@@ -376,8 +333,8 @@ export default function DropZone() {
     );
   }
 
-  // Show sign-in gate while auth state is loading or user is not signed in (and not in beta mode)
-  if (!loading && !user && !betaMode) {
+  // Show the sign-in gate once auth has loaded and nobody is signed in.
+  if (!loading && !user) {
     return (
       <div className="w-full max-w-xl mx-auto">
         <div className="rounded-2xl border-2 border-dashed border-gray-200 bg-white p-8 text-center">
@@ -398,16 +355,6 @@ export default function DropZone() {
             {signingIn ? "Signing in…" : "Sign in with Google to continue"}
           </button>
           <p className="text-gray-400 text-xs mt-3">Free plan · no credit card required</p>
-
-          <div className="mt-4 pt-4 border-t border-gray-100">
-            <p className="text-gray-400 text-xs mb-2">Helping us test?</p>
-            <button
-              onClick={handleActivateBeta}
-              className="text-xs text-gray-500 hover:text-black underline underline-offset-2 transition-colors"
-            >
-              Beta tester? Try without signing in →
-            </button>
-          </div>
         </div>
       </div>
     );
@@ -415,18 +362,6 @@ export default function DropZone() {
 
   return (
     <div className="w-full max-w-xl mx-auto flex flex-col gap-3">
-      {betaMode && !user && (
-        <div className="flex items-center justify-between rounded-xl bg-amber-50 border border-amber-200 px-3 py-2">
-          <span className="text-xs text-amber-700 font-medium">Beta tester mode — free scan</span>
-          <button
-            onClick={handleSignIn}
-            className="text-xs text-amber-800 underline underline-offset-2 hover:opacity-70"
-          >
-            Sign in instead →
-          </button>
-        </div>
-      )}
-
       {/* Hint field */}
       <div>
         <label className="block text-[10px] uppercase tracking-widest text-gray-500 mb-1.5">

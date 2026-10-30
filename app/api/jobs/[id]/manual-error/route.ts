@@ -9,7 +9,6 @@ export async function POST(
   const { id: jobId } = await params;
 
   const authHeader = req.headers.get("Authorization");
-  const betaToken = req.headers.get("X-Beta-Token");
 
   let uid: string | null = null;
 
@@ -20,7 +19,7 @@ export async function POST(
     } catch {
       return NextResponse.json({ error: "Invalid token" }, { status: 401 });
     }
-  } else if (!betaToken) {
+  } else {
     return NextResponse.json({ error: "Unauthenticated" }, { status: 401 });
   }
 
@@ -81,9 +80,9 @@ export async function POST(
 
     const jobData = jobSnap.data()!;
     const isOwner = uid && jobData.ownerUid === uid;
-    const isBetaOwner = betaToken && jobData.betaToken === betaToken;
-    const isPublicJob = jobData.ownerUid == null || jobData.isPublic === true;
-    if (!isOwner && !isBetaOwner && !isPublicJob) {
+    // Owner only. Every job is created isPublic, so "public" let any signed-in
+    // user add or move error markers on anyone's video from its link.
+    if (!isOwner) {
       return NextResponse.json({ error: "job not found" }, { status: 404 });
     }
 

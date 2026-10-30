@@ -30,8 +30,7 @@ export async function POST(
       uid = null;
     }
   }
-  const betaToken = req.headers.get("X-Beta-Token");
-  const distinctId = uid ?? (betaToken ? `beta_${betaToken.slice(0, 8)}` : `anon_job_${jobId}`);
+  const distinctId = uid ?? `anon_job_${jobId}`;
 
   try {
     const snap = await adminDb

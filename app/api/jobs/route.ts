@@ -9,70 +9,36 @@ import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
 import { ensureEntitlement } from "@/lib/entitlements";
 import { dailyScanStatus, scanLimitMessage } from "@/lib/scanLimit";
 
-const BETA_MAX_CREDITS = 200;
-
-async function checkBetaToken(token: string): Promise<{ ok: boolean; reason?: string }> {
-  if (!token || token.length < 10) return { ok: false, reason: "invalid_token" };
-  const useRef = adminDb.collection("betaUses").doc(token);
-  const poolRef = adminDb.collection("config").doc("beta");
-
-  return adminDb.runTransaction(async (tx) => {
-    const [useSnap, poolSnap] = await Promise.all([tx.get(useRef), tx.get(poolRef)]);
-    if (useSnap.exists) return { ok: false, reason: "already_used" };
-    const used = poolSnap.exists ? (poolSnap.data()?.usedCount ?? 0) : 0;
-    if (used >= BETA_MAX_CREDITS) return { ok: false, reason: "pool_exhausted" };
-    tx.set(useRef, { claimedAt: Date.now() });
-    tx.set(poolRef, { usedCount: used + 1, maxCredits: BETA_MAX_CREDITS }, { merge: true });
-    return { ok: true };
-  });
-}
-
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("Authorization");
-  const betaToken = req.headers.get("X-Beta-Token");
 
-  let uid: string | null = null;
-  let isBeta = false;
-
-  if (authHeader?.startsWith("Bearer ")) {
-    try {
-      const decoded = await adminAuth.verifyIdToken(authHeader.slice(7));
-      uid = decoded.uid;
-    } catch {
-      return NextResponse.json({ error: "Invalid token" }, { status: 401 });
-    }
-  } else if (betaToken) {
-    const betaCheck = await checkBetaToken(betaToken);
-    if (!betaCheck.ok) {
-      const msg = betaCheck.reason === "pool_exhausted"
-        ? "The beta pool is full. Check back soon!"
-        : betaCheck.reason === "already_used"
-          ? "This beta slot has already been used."
-          : "Invalid beta token.";
-      return NextResponse.json({ error: msg, code: betaCheck.reason }, { status: 403 });
-    }
-    isBeta = true;
-  } else {
+  // The no-sign-in beta path is gone (30 Oct): it could scan but never fix,
+  // and left no way to follow up. Google sign-in is one tap.
+  if (!authHeader?.startsWith("Bearer ")) {
     return NextResponse.json({ error: "Sign in to analyse a video.", code: "unauthenticated" }, { status: 401 });
+  }
+  let uid: string;
+  try {
+    uid = (await adminAuth.verifyIdToken(authHeader.slice(7))).uid;
+  } catch {
+    return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
 
   try {
     // Refuse an account over its daily scan limit now, before it uploads the
     // file. /start counts the scan; this only reads, so a job that is created
     // and never started costs nothing.
-    if (uid) {
-      const userRecord = await adminAuth.getUser(uid).catch(() => null);
-      const ent = await ensureEntitlement(uid, {
-        email: userRecord?.email ?? null,
-        emailVerified: userRecord?.emailVerified ?? false,
-      });
-      const { limit, reached } = await dailyScanStatus(uid, ent);
-      if (reached) {
-        return NextResponse.json(
-          { error: scanLimitMessage(limit), code: "scan_limit" },
-          { status: 429 }
-        );
-      }
+    const userRecord = await adminAuth.getUser(uid).catch(() => null);
+    const ent = await ensureEntitlement(uid, {
+      email: userRecord?.email ?? null,
+      emailVerified: userRecord?.emailVerified ?? false,
+    });
+    const { limit, reached } = await dailyScanStatus(uid, ent);
+    if (reached) {
+      return NextResponse.json(
+        { error: scanLimitMessage(limit), code: "scan_limit" },
+        { status: 429 }
+      );
     }
 
     const { filename, contentType, userHint } = await req.json();
@@ -103,8 +69,7 @@ export async function POST(req: NextRequest) {
       .collection("jobs")
       .doc(jobId)
       .set({
-        ...(uid ? { ownerUid: uid } : { ownerUid: null }),
-        ...(isBeta ? { betaToken: betaToken } : {}),
+        ownerUid: uid,
         isPublic: true,
         status: "uploading",
         inputVideoUrl: "",
@@ -123,22 +88,21 @@ export async function POST(req: NextRequest) {
     const createdAt = new Date();
 
     after(async () => {
-      const distinctId = uid ?? `beta_${betaToken?.slice(0, 8)}`;
       await captureServer({
-        distinctId,
+        distinctId: uid,
         event: "job_created",
         timestamp: createdAt,
         properties: {
           job_id: jobId,
           has_hint: !!cleanedHint,
           content_type: contentType,
-          is_beta: isBeta,
+          is_beta: false,
         },
       });
 
-      const who = isBeta ? `Beta user (token: ${betaToken?.slice(0, 8)}…)` : `Signed-in user (uid: ${uid})`;
+      const who = `Signed-in user (uid: ${uid})`;
       notifyOwner(
-        `[Scene Fixer] New job — ${isBeta ? "Beta" : "User"}`,
+        "[Scene Fixer] New job — User",
         `${who} created job ${jobId}.\n\nFile: ${filename}\nHint: ${cleanedHint || "(none)"}\nTime: ${new Date().toUTCString()}`
       );
     });
