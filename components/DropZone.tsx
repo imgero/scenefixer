@@ -43,6 +43,7 @@ export default function DropZone() {
   const [hint, setHint] = useState("");
   const [signingIn, setSigningIn] = useState(false);
   const [betaMode, setBetaMode] = useState(false);
+  const busy = useRef(false);
   // The job a failed attempt created, kept so a retry of the same file
   // uploads into it instead of abandoning it. See handleFile.
   const pendingUpload = useRef<{
@@ -56,7 +57,6 @@ export default function DropZone() {
   useEffect(() => {
     setBetaMode(localStorage.getItem("sf_beta_mode") === "1");
   }, []);
-
   const handleSignIn = async () => {
     posthog.capture("sign_in_clicked", { source: "dropzone" });
     setSigningIn(true);
@@ -95,7 +95,16 @@ export default function DropZone() {
       }
 
       const trimmedHint = hint.trim().slice(0, 500);
-      const betaId = betaMode ? getBetaId() : null;
+      // A signed-in upload is never a beta one, even if beta mode was switched
+      // on before signing up: it stayed on, so every later upload was reported
+      // and stored as a beta job while the server treated it as the account's.
+      const betaId = betaMode && !auth.currentUser ? getBetaId() : null;
+
+      // One upload at a time. On 29 Oct an Android phone fired the file
+      // picker's change twice, 3 s apart: two jobs were created and one was
+      // left in "uploading" for good.
+      if (busy.current) return;
+      busy.current = true;
 
       // Show the panel immediately, before any network call.
       setProgress(0);
@@ -153,6 +162,8 @@ export default function DropZone() {
               setError("The beta pool is full. Sign up for free to continue!");
             } else if (data.code === "already_used") {
               setError("This beta slot has already been used. Sign up for free — it's quick!");
+            } else if (data.code === "scan_limit" && data.error) {
+              setError(data.error);
             } else {
               setError("Upload failed. Please try again.");
             }
@@ -269,6 +280,14 @@ export default function DropZone() {
             message: startData.error ?? null,
             is_beta: !!betaId,
           });
+          // Said as it is. Thrown, it fell through to "Upload failed. Please
+          // try again." and people retried the same file into the same refusal.
+          if (startData.code === "scan_limit" && startData.error) {
+            setError(startData.error);
+            setProgress(null);
+            setStage("");
+            return;
+          }
           throw new Error(startData.error ?? "Failed to start pipeline");
         }
 
@@ -305,6 +324,8 @@ export default function DropZone() {
         );
         setProgress(null);
         setStage("");
+      } finally {
+        busy.current = false;
       }
     },
     [router, hint, betaMode]

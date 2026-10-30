@@ -6,6 +6,8 @@ import { FieldValue } from "firebase-admin/firestore";
 import { captureServer } from "@/lib/posthog-server";
 import { notifyOwner } from "@/lib/notify";
 import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
+import { ensureEntitlement } from "@/lib/entitlements";
+import { dailyScanStatus, scanLimitMessage } from "@/lib/scanLimit";
 
 const BETA_MAX_CREDITS = 200;
 
@@ -55,6 +57,24 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    // Refuse an account over its daily scan limit now, before it uploads the
+    // file. /start counts the scan; this only reads, so a job that is created
+    // and never started costs nothing.
+    if (uid) {
+      const userRecord = await adminAuth.getUser(uid).catch(() => null);
+      const ent = await ensureEntitlement(uid, {
+        email: userRecord?.email ?? null,
+        emailVerified: userRecord?.emailVerified ?? false,
+      });
+      const { limit, reached } = await dailyScanStatus(uid, ent);
+      if (reached) {
+        return NextResponse.json(
+          { error: scanLimitMessage(limit), code: "scan_limit" },
+          { status: 429 }
+        );
+      }
+    }
+
     const { filename, contentType, userHint } = await req.json();
 
     if (!filename || !contentType) {
