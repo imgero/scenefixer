@@ -99,6 +99,7 @@ export async function POST(
       tx.update(userRef, { creditsBalance: balance - cost });
       tx.update(jobRef, {
         status: "detecting",
+        analysisRequestedAt: Date.now(),
         deepScanCredits: cost,
         deepScanRefunded: false,
       });

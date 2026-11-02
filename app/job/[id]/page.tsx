@@ -226,6 +226,27 @@ export default function JobPage({ params }: Props) {
   const monthlyLimit = PLAN_LIMITS[userPlan].creditsPerMonth;
   const quotaExhausted = user ? (fixesUsed >= monthlyLimit && creditsBalance <= 0) : false;
 
+  // The same charge the fix route makes (calcCreditsNeeded): each fix costs
+  // the full length of the shot it repairs, at most 8 fixes a run. It used to
+  // appear only in the refusal after pressing Fix, so people went to pricing
+  // not knowing what they needed: on 24 Oct a buyer of 15 credits learned
+  // there that his six fixes cost 75.
+  const fixCost = errors
+    .filter(
+      (e) =>
+        e.userConfirmed &&
+        e.repairable !== false &&
+        (e.fixStatus === "pending" || e.fixStatus === "failed")
+    )
+    .slice(0, 8)
+    .reduce((sum, e) => {
+      const targetId = (e.fixDirection ?? "aTob") === "aTob" ? e.shotBId : e.shotAId;
+      const target = shots.find((s) => s.id === targetId);
+      return sum + (target ? Math.max(1, Math.ceil((target.endMs - target.startMs) / 1000)) : 5);
+    }, 0);
+  const creditsAvailable = Math.max(0, monthlyLimit - fixesUsed) + creditsBalance;
+  const creditsShort = !!user && fixCost > creditsAvailable;
+
   const handleFix = async () => {
     setFixError(null);
     setFixing(true);
@@ -410,23 +431,26 @@ export default function JobPage({ params }: Props) {
       {/* Free scan notice. A free scan runs on Claude Haiku with a hard cost
           cap (modal_app/detect.py), and says so rather than letting its
           findings pass for the Opus deep scan. */}
+      {/* Not on a single-shot clip: there is nothing to compare, so a deeper
+          scan of it would find nothing more (3 of 6 scans, 30 Oct–2 Nov). */}
       {job.scanTier === "free" &&
         job.scoreBefore !== undefined &&
-        job.status === "awaiting_confirmation" && (
+        job.status === "awaiting_confirmation" &&
+        shots.filter((s) => !s.isBlank).length >= 2 && (
         <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
           {job.deepScanRefunded && job.deepScanError && (
             <p className="text-xs text-amber-900 font-semibold mb-2">{job.deepScanError}</p>
           )}
           <p className="text-sm text-amber-900 font-semibold mb-1">
-            This was a free quick scan with Claude Haiku
+            Free scan with our standard AI model (Claude Haiku)
           </p>
           <p className="text-xs text-amber-800">
-            Haiku is a smaller and weaker model than the one our deep scan uses, so
-            it can miss errors or flag things that are fine.
+            Every finding below is yours to keep, free. The standard model can miss
+            errors or flag things that are fine.
             {job.scanBudgetHit
               ? " This video was also too long for a full free scan, so part of it was not checked."
               : ""}{" "}
-            A deep scan re-checks this video with Claude Opus for{" "}
+            A deep scan re-checks this video with our most advanced model (Claude Opus) for{" "}
             <b>
               {DEEP_SCAN_CREDITS_PER_SHOT} credit per shot
               {deepScanCost > 0 ? `, ${deepScanCost} credits here` : ""}
@@ -443,7 +467,7 @@ export default function JobPage({ params }: Props) {
             </button>
           ) : (
             <Link
-              href="/pricing"
+              href={`/pricing?need=${Math.max(1, deepScanCost - creditsBalance)}&job=${jobId}`}
               className="inline-block mt-2 text-xs font-semibold text-amber-900 underline underline-offset-2 hover:opacity-70"
               onClick={() =>
                 posthog.capture("deep_scan_buy_clicked", {
@@ -529,6 +553,7 @@ export default function JobPage({ params }: Props) {
       <div className={isAbandonedUpload(job) ? "hidden" : "mb-6"}>
         <JobStatus
           status={job.status}
+          requestedAt={job.analysisRequestedAt}
           shotCount={job.shotCount || undefined}
           shotsAnalyzed={job.shotsAnalyzed}
           errorMessage={job.errorMessage}
@@ -711,9 +736,16 @@ export default function JobPage({ params }: Props) {
 
               {confirmedCount > 0 &&
                 (job.status === "awaiting_confirmation" || job.status === "done" || fixTimedOut) && (
-                  quotaExhausted ? (
+                  quotaExhausted || creditsShort ? (
                     <a
-                      href="/pricing"
+                      href={`/pricing?need=${Math.max(1, fixCost - creditsAvailable)}&job=${jobId}`}
+                      onClick={() =>
+                        posthog.capture("buy_credits_to_fix_clicked", {
+                          job_id: jobId,
+                          credits_needed: fixCost,
+                          balance: creditsAvailable,
+                        })
+                      }
                       className="px-5 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 font-semibold text-sm hover:bg-amber-100 transition-colors"
                     >
                       Buy credits to fix →
@@ -729,12 +761,21 @@ export default function JobPage({ params }: Props) {
                         ? "Starting…"
                         : fixTimedOut
                           ? `Retry ${confirmedCount} fix${confirmedCount !== 1 ? "es" : ""}`
-                          : `Fix ${confirmedCount} error${confirmedCount !== 1 ? "s" : ""}`}
+                          : `Fix ${confirmedCount} error${confirmedCount !== 1 ? "s" : ""} · ${fixCost} credits`}
                     </button>
                   )
                 )}
             </div>
           </div>
+
+          {confirmedCount > 0 && user && (
+            <p className="mb-3 text-xs text-gray-500">
+              {confirmedCount > 8 ? "The first 8 of these fixes use" : "These fixes use"}{" "}
+              <b className="text-black">{fixCost} credits</b> — one per second of each shot
+              being fixed. You have {creditsAvailable}.
+              {creditsShort && ` You need ${fixCost - creditsAvailable} more.`}
+            </p>
+          )}
 
           {confirmedCount > 8 && (
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800">

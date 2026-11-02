@@ -115,21 +115,18 @@ def _refund_daily_scan(owner_uid: str | None) -> bool:
 # Every secret named here must already exist, or `modal deploy` fails before it
 # starts. So adding one is a deploy-breaking change until it is created.
 #
-# TO TURN ON OUTCOME EMAILS (modal_app/notify.py), two steps, in this order:
-#   1. modal secret create loops-api-key \
-#        LOOPS_API_KEY=... LOOPS_OWNER_TRANSACTIONAL_ID=...
-#   2. add `modal.Secret.from_name("loops-api-key"),` to this list AND to
-#      FIX_SECRETS below, then redeploy.
-# Until then notify.py finds no key and no-ops silently — which is exactly
-# what lib/notify.ts did on the web side from the day it was written, because
-# it called Resend and RESEND_API_KEY is set in no environment at all. Both
-# sides now go through Loops, whose key already exists and already works.
+# loops-api-key holds LOOPS_API_KEY, LOOPS_OWNER_TRANSACTIONAL_ID and, once
+# its Loops template exists, LOOPS_USER_TRANSACTIONAL_ID. notify.py no-ops on
+# any of them missing.
 ANALYSIS_SECRETS = [
     modal.Secret.from_name("firebase-admin-key"),
     modal.Secret.from_name("anthropic-api-key"),
     modal.Secret.from_name("modal-bearer-token"),
     modal.Secret.from_name("replicate-api-token"),
     modal.Secret.from_name("posthog-api-key"),
+    # Outcome emails to the owner (LOOPS_OWNER_TRANSACTIONAL_ID) and to the
+    # uploader (LOOPS_USER_TRANSACTIONAL_ID). Created 2 Nov.
+    modal.Secret.from_name("loops-api-key"),
 ]
 
 
@@ -201,7 +198,44 @@ def _run_deep_scan(job_id: str):
             },
             job=job,
         )
+        try:
+            from modal_app import notify
+            notify.user_scan_failed(job_id, job=job, message=_DEEP_SCAN_FAILED_MESSAGE)
+        except Exception as exc:
+            print(f"deep scan notify failed: {exc}")
         raise
+
+
+def _record_worker_start(job_id: str) -> None:
+    """
+    Note when a worker actually picked the job up, and how many times.
+
+    On 1 Nov a 35-shot scan finished 42 minutes after it was requested while
+    its own timer read 6.5: either it sat in Modal's queue or a first attempt
+    died and was rerun, and nothing recorded which. queue_ms is the wait since
+    the web app asked for the scan; attempt above 1 means a rerun.
+    """
+    import time
+    from google.cloud.firestore_v1 import Increment
+    from modal_app import analytics
+    from modal_app.firebase import get_db
+
+    try:
+        ref = get_db().collection("jobs").document(job_id)
+        ref.update({"analysisAttempts": Increment(1), "analysisWorkerStartedAt": int(time.time() * 1000)})
+        job = ref.get().to_dict() or {}
+        requested = job.get("analysisRequestedAt")
+        analytics.capture(
+            job_id,
+            "job_worker_started",
+            {
+                "attempt": job.get("analysisAttempts", 1),
+                "queue_ms": int(time.time() * 1000) - requested if isinstance(requested, (int, float)) else None,
+            },
+            job=job,
+        )
+    except Exception as exc:
+        print(f"worker start record failed: {exc}")
 
 
 @app.function(image=image, secrets=ANALYSIS_SECRETS, timeout=7200, min_containers=0)
@@ -224,6 +258,7 @@ def run_process_job(job_id: str, deep_scan: bool = False):
     from modal_app import analytics
 
     analytics.start_timer(job_id)
+    _record_worker_start(job_id)
 
     if deep_scan:
         _run_deep_scan(job_id)
@@ -322,6 +357,17 @@ def run_process_job(job_id: str, deep_scan: bool = False):
                     )
                 ),
             )
+            if not finished:
+                notify.user_scan_failed(
+                    job_id,
+                    job=current,
+                    message=(
+                        _OUTAGE_MESSAGE if outage
+                        else _UNREADABLE_MESSAGE if isinstance(e, subprocess.CalledProcessError)
+                        else "Something went wrong while scanning your video, and it wasn't "
+                        "counted as your scan. Please try uploading it again."
+                    ),
+                )
         except Exception as exc:
             print(f"analysis_failed notify failed: {exc}")
 
@@ -338,7 +384,7 @@ FIX_SECRETS = [
     # Without this the fix_completed cost event silently no-ops —
     # analytics._get_client() returns None when POSTHOG_API_KEY is absent.
     modal.Secret.from_name("posthog-api-key"),
-    # Outcome emails: add loops-api-key here too — see ANALYSIS_SECRETS.
+    modal.Secret.from_name("loops-api-key"),
 ]
 
 
@@ -658,7 +704,7 @@ async def process_job(body: dict, _: None = Depends(_verify_token)):
     if not job_id:
         raise HTTPException(status_code=400, detail="jobId required")
 
-    call = run_process_job.spawn(job_id, deep_scan=bool(body.get("deepScan")))
+    call = await run_process_job.spawn.aio(job_id, deep_scan=bool(body.get("deepScan")))
     return {"ok": True, "spawned": True, "callId": call.object_id}
 
 
@@ -676,7 +722,7 @@ async def fix_phase(body: dict, _: None = Depends(_verify_token)):
     if not job_id:
         raise HTTPException(status_code=400, detail="jobId required")
 
-    call = run_fix_phase.spawn(job_id)
+    call = await run_fix_phase.spawn.aio(job_id)
     return {"ok": True, "spawned": True, "callId": call.object_id}
 
 

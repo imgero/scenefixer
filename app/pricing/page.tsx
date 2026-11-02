@@ -4,10 +4,9 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/lib/hooks/useAuth";
 import { auth } from "@/lib/firebase";
-import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 import Link from "next/link";
 import posthog from "posthog-js";
-import { registerLoopsContact } from "@/lib/loops";
+import { signInWithGoogle } from "@/lib/signIn";
 import { FREE_SCANS_PER_DAY } from "@/lib/types";
 import { HelpLink } from "@/components/HelpDialog";
 
@@ -51,9 +50,21 @@ function PricingContent() {
   const searchParams = useSearchParams();
   const success = searchParams.get("success");
   const cancelled = searchParams.get("cancelled");
+  // Set by the job page's "Buy credits to fix": how many more credits that
+  // scan's selected fixes need, and which scan to return to. People arrived
+  // here from a fix and left within 20 seconds, with nothing telling them
+  // which pack would cover it.
+  const needParam = Number(searchParams.get("need"));
+  const need = Number.isFinite(needParam) && needParam > 0 ? Math.ceil(needParam) : null;
+  const jobParam = searchParams.get("job");
+  const returnJob = jobParam && /^[a-z0-9]{10,40}$/.test(jobParam) ? jobParam : null;
+  const coveringPack = need
+    ? CREDIT_PACKS.find((p) => p.credits >= need) ?? CREDIT_PACKS[CREDIT_PACKS.length - 1]
+    : null;
   const successCaptured = useRef(false);
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState<string | null>(null);
+  const [signInError, setSignInError] = useState<string | null>(null);
 
   // Self-serve cancellation. Previously there was no path out of a
   // subscription anywhere in the app; the only customer to subscribe had to be
@@ -93,17 +104,9 @@ function PricingContent() {
 
   const ensureSignedIn = async (): Promise<boolean> => {
     if (user) return true;
-    try {
-      const provider = new GoogleAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      posthog.identify(result.user.uid, { email: result.user.email ?? undefined });
-      if (getAdditionalUserInfo(result)?.isNewUser && result.user.email) {
-        registerLoopsContact(result.user.email, result.user.uid);
-      }
-      return true;
-    } catch {
-      return false;
-    }
+    const result = await signInWithGoogle("pricing");
+    if (!result.ok && result.message) setSignInError(result.message);
+    return result.ok;
   };
 
   const handleBuyPack = async (pack: string) => {
@@ -114,7 +117,7 @@ function PricingContent() {
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ type: "credits", pack }),
+        body: JSON.stringify({ type: "credits", pack, job: returnJob ?? undefined }),
       });
       const data = await res.json();
       if (data.url) {
@@ -139,11 +142,42 @@ function PricingContent() {
         {success === "credits" && (
           <div className="mb-8 rounded-xl border border-green-200 bg-green-50 px-5 py-4 text-sm text-green-800 text-center">
             Credits added to your account!
+            {returnJob && (
+              <>
+                {" "}
+                <a href={`/job/${returnJob}`} className="font-semibold underline underline-offset-2">
+                  Back to your scan to fix it →
+                </a>
+              </>
+            )}
           </div>
         )}
         {cancelled && (
           <div className="mb-8 rounded-xl border border-gray-200 bg-gray-50 px-5 py-4 text-sm text-gray-600 text-center">
             Checkout cancelled — you haven&apos;t been charged.
+            {returnJob && (
+              <>
+                {" "}
+                <a href={`/job/${returnJob}`} className="font-semibold underline underline-offset-2">
+                  Back to your scan →
+                </a>
+              </>
+            )}
+          </div>
+        )}
+        {need && coveringPack && !success && !cancelled && (
+          <div className="mb-8 max-w-md mx-auto rounded-xl border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-900">
+            <p>
+              You need <b>{need} more credit{need === 1 ? "" : "s"}</b> for that.{" "}
+              {coveringPack.credits >= need
+                ? `The $${coveringPack.price} pack (${coveringPack.credits} credits) covers it.`
+                : `Even the $${coveringPack.price} pack doesn't cover all of it — select fewer fixes, or fix in two rounds.`}
+            </p>
+            {returnJob && (
+              <a href={`/job/${returnJob}`} className="inline-block mt-2 text-xs font-semibold underline underline-offset-2">
+                ← Back to your scan
+              </a>
+            )}
           </div>
         )}
 
@@ -190,8 +224,9 @@ function PricingContent() {
             <li className="flex items-start gap-2">
               <span className="text-gray-400 mt-0.5">✓</span>
               <span className="text-gray-700">
-                <span className="text-black font-semibold">A quick scan with Claude Haiku</span>,
-                a smaller and weaker model that can miss errors
+                <span className="text-black font-semibold">A full error report</span> from
+                our standard AI model (Claude Haiku) — every finding shown, free. It can
+                miss things
               </span>
             </li>
           </ul>
@@ -202,7 +237,7 @@ function PricingContent() {
           <div className="mb-5">
             <h3 className="font-semibold text-black text-base mb-1">Buy credits to fix</h3>
             <p className="text-sm text-gray-500">
-              Credits pay for fixes, and for a deep scan with Claude Opus when you
+              Credits pay for fixes, and for a deep scan with our most advanced AI model (Claude Opus) when you
               want one: 1 credit per shot. Output is 720p with no watermark, and a fix that
               doesn&apos;t land is refunded automatically. Credits never expire
               and there is nothing to cancel.
@@ -230,7 +265,9 @@ function PricingContent() {
                 key={pack.pack}
                 onClick={() => handleBuyPack(pack.pack)}
                 disabled={loading === `credits_${pack.pack}`}
-                className="relative rounded-xl border border-gray-200 bg-white px-4 py-3 text-left hover:border-black transition-colors disabled:opacity-50"
+                className={`relative rounded-xl border bg-white px-4 py-3 text-left hover:border-black transition-colors disabled:opacity-50 ${
+                  coveringPack?.pack === pack.pack ? "border-black ring-2 ring-amber-300" : "border-gray-200"
+                }`}
               >
                 {pack.label && (
                   <span className="absolute -top-2 right-3 text-[10px] font-semibold bg-black text-white px-1.5 py-0.5 rounded-full">
@@ -246,6 +283,9 @@ function PricingContent() {
             ))}
           </div>
 
+          {signInError && (
+            <p className="text-xs text-red-600 text-center mt-3">{signInError}</p>
+          )}
           <p className="text-[11px] text-gray-400 text-center mt-4">
             One-time · never expire · no subscription required ·{" "}
             <Link href="/legal/refunds" className="underline underline-offset-2 hover:text-black">
