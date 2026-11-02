@@ -1314,6 +1314,7 @@ def run_detect(job_id: str) -> int:
             analysed_s=fresh.get("analysedSeconds"),
             total_s=fresh.get("totalSeconds"),
         )
+        notify.user_scan_finished(job_id, job=fresh, error_count=total_errors, shot_count=len(shots))
     except Exception as exc:
         print(f"analysis_finished notify failed: {exc}")
 

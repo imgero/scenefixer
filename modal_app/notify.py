@@ -40,10 +40,14 @@ _LOOPS_URL = "https://app.loops.so/api/v1/transactional"
 
 
 def _send(subject: str, text: str) -> None:
+    """Email the owner. Swallows everything."""
+    _send_to(OWNER_EMAIL, os.environ.get("LOOPS_OWNER_TRANSACTIONAL_ID"), subject, text)
+
+
+def _send_to(email: str, transactional_id: str | None, subject: str, text: str) -> None:
     """Post one transactional email to Loops. Swallows everything."""
     api_key = os.environ.get("LOOPS_API_KEY")
-    transactional_id = os.environ.get("LOOPS_OWNER_TRANSACTIONAL_ID")
-    if not api_key or not transactional_id:
+    if not api_key or not transactional_id or not email:
         return
     try:
         import requests
@@ -55,10 +59,10 @@ def _send(subject: str, text: str) -> None:
                 "Content-Type": "application/json",
             },
             json={
-                "email": OWNER_EMAIL,
+                "email": email,
                 "transactionalId": transactional_id,
-                # The owner address is already a Loops contact; this keeps a
-                # first send working if it ever is not.
+                # Never subscribes anyone: a transactional send is not consent
+                # to marketing.
                 "addToAudience": False,
                 "dataVariables": {
                     "subject_line": subject,
@@ -195,3 +199,58 @@ def fix_finished(
             "happening, the fix stage — not detection — is what to look at.",
         ]
     _send(subject, "\n".join(body))
+
+
+# ── Emails to the person who uploaded ────────────────────────────────────────
+#
+# Until 2 Nov nobody who uploaded heard from us: a scan takes one to seven
+# minutes, people leave the tab, and the 1 Nov user whose 35-shot scan took 42
+# minutes never saw her 15 findings. These need their own Loops template: a
+# transactional email with `subject_line` and `body_text` data variables,
+# published, its id in LOOPS_USER_TRANSACTIONAL_ID on the loops-api-key secret.
+# Until that is set they no-op.
+
+def _uploader_email(job: dict[str, Any] | None) -> str | None:
+    uid = (job or {}).get("ownerUid")
+    if not uid:
+        return None
+    try:
+        from modal_app.firebase import get_db
+
+        user = get_db().collection("users").document(uid).get().to_dict() or {}
+        return user.get("email")
+    except Exception:
+        return None
+
+
+def user_scan_finished(job_id: str, *, job: dict[str, Any] | None, error_count: int, shot_count: int) -> None:
+    """Tell the uploader their scan is ready."""
+    url = f"https://scenefixer.com/job/{job_id}"
+    if error_count:
+        subject = f"Your scan is ready — {error_count} continuity error{'s' if error_count != 1 else ''} found"
+        lines = [
+            f"We checked {shot_count} shot{'s' if shot_count != 1 else ''} in your video and found "
+            f"{error_count} thing{'s' if error_count != 1 else ''} that don't match between shots.",
+            "",
+            f"See them here: {url}",
+        ]
+    else:
+        subject = "Your scan is ready"
+        lines = [
+            f"We checked {shot_count} shot{'s' if shot_count != 1 else ''} in your video and found no "
+            "continuity errors.",
+            "",
+            f"See the result: {url}",
+        ]
+    _send_to(_uploader_email(job), os.environ.get("LOOPS_USER_TRANSACTIONAL_ID"), subject, "\n".join(lines))
+
+
+def user_scan_failed(job_id: str, *, job: dict[str, Any] | None, message: str) -> None:
+    """Tell the uploader their scan didn't finish, in the words the job page uses."""
+    url = f"https://scenefixer.com/job/{job_id}"
+    _send_to(
+        _uploader_email(job),
+        os.environ.get("LOOPS_USER_TRANSACTIONAL_ID"),
+        "Your scan didn't finish",
+        f"{message}\n\nDetails: {url}",
+    )

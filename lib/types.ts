@@ -62,6 +62,8 @@ export type Job = {
    * tier_for_job pick Opus; holding credits alone no longer does.
    */
   deepScanCredits?: number;
+  /** When the web app asked Modal for this scan (ms since epoch). */
+  analysisRequestedAt?: number;
   /** The deep scan failed before finishing and its credits were returned. */
   deepScanRefunded?: boolean;
   /** What to tell the owner when a deep scan failed and was rolled back. */

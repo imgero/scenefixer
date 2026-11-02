@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
   useEffect,
   useRef,
   useState,
@@ -58,6 +58,14 @@ export default function ManualMarker({
   useEffect(() => {
     setBboxes([]);
     setPreviewBbox(null);
+    // On a phone the columns stack and the frame to draw on sits below a tall
+    // list of thumbnails; bring it into view once one is picked.
+    if (picked && window.matchMedia("(max-width: 767px)").matches) {
+      requestAnimationFrame(() =>
+        imgWrapRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [picked?.frameUrl]);
 
   // Keyboard: Esc closes the modal
@@ -69,15 +77,26 @@ export default function ManualMarker({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const startDrag = (e: ReactMouseEvent<HTMLDivElement>) => {
+  // Pointer events, not mouse events: a phone sends no mousemove during a
+  // drag, it scrolls the page. Every phone user who opened this dialog closed
+  // it without a box, so the errors that need one could never be fixed there.
+  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!imgWrapRef.current) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    // Keep receiving moves when a finger slides off the frame. Best-effort:
+    // it throws for a pointer the browser no longer considers active.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* drawing still works without capture */
+    }
     const rect = imgWrapRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
     dragRef.current = { x, y };
     setPreviewBbox({ x, y, w: 0, h: 0 });
   };
-  const continueDrag = (e: ReactMouseEvent<HTMLDivElement>) => {
+  const continueDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!dragRef.current || !imgWrapRef.current) return;
     const rect = imgWrapRef.current.getBoundingClientRect();
     const cx = (e.clientX - rect.left) / rect.width;
@@ -119,7 +138,7 @@ export default function ManualMarker({
   // A disabled button with no reason reads as broken. Name the first missing
   // step, in the order the modal asks for them.
   const missingStep = !picked
-    ? "Pick a frame on the left."
+    ? "Pick a frame first."
     : bboxes.length === 0
       ? "Drag on the frame to draw a box around the error."
       : !adjusting && description.trim().length === 0
@@ -261,7 +280,7 @@ export default function ManualMarker({
             {picked ? (
               <>
                 <p className="text-[10px] uppercase tracking-widest text-gray-500 mb-2">
-                  Drag to draw a box around the error
+                  Drag (or slide your finger) to draw a box around the error
                   {bboxes.length > 0 && (
                     <span className="ml-2 normal-case tracking-normal text-gray-400">
                       · {bboxes.length} box{bboxes.length !== 1 ? "es" : ""} drawn ·
@@ -271,11 +290,11 @@ export default function ManualMarker({
                 </p>
                 <div
                   ref={imgWrapRef}
-                  onMouseDown={startDrag}
-                  onMouseMove={continueDrag}
-                  onMouseUp={endDrag}
-                  onMouseLeave={endDrag}
-                  className="relative rounded-lg overflow-hidden bg-gray-100 select-none cursor-crosshair aspect-video"
+                  onPointerDown={startDrag}
+                  onPointerMove={continueDrag}
+                  onPointerUp={endDrag}
+                  onPointerCancel={endDrag}
+                  className="relative rounded-lg overflow-hidden bg-gray-100 select-none cursor-crosshair aspect-video touch-none"
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
@@ -299,7 +318,7 @@ export default function ManualMarker({
                     >
                       <button
                         type="button"
-                        onMouseDown={(e) => {
+                        onPointerDown={(e) => {
                           // Prevent triggering a new drag on the canvas
                           e.stopPropagation();
                         }}

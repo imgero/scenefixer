@@ -2,13 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
+import { signOut } from "firebase/auth";
 import { doc, setDoc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/hooks/useAuth";
 import { PLAN_LIMITS, type Plan } from "@/lib/types";
 import posthog from "posthog-js";
-import { registerLoopsContact } from "@/lib/loops";
+import { signInWithGoogle } from "@/lib/signIn";
 import { HelpLink } from "@/components/HelpDialog";
 
 /**
@@ -49,6 +49,7 @@ function getInitials(email: string): string {
 export default function Header() {
   const { user, loading } = useAuth();
   const [signingIn, setSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [fixesUsed, setFixesUsed] = useState(0);
   const [creditsBalance, setCreditsBalance] = useState(0);
@@ -78,16 +79,14 @@ export default function Header() {
 
   const handleSignIn = async () => {
     setSigningIn(true);
+    setSignInError(null);
     try {
-      const provider = new GoogleAuthProvider();
-      const result = await signInWithPopup(auth, provider);
-      posthog.identify(result.user.uid, { email: result.user.email ?? undefined });
-      if (getAdditionalUserInfo(result)?.isNewUser && result.user.email) {
-        registerLoopsContact(result.user.email, result.user.uid);
+      const result = await signInWithGoogle("header");
+      if (result.ok) {
+        await ensureUserIdentity(result.user.uid, result.user.email ?? "");
+      } else {
+        setSignInError(result.message);
       }
-      await ensureUserIdentity(result.user.uid, result.user.email ?? "");
-    } catch (err) {
-      console.error("Sign-in error:", err);
     } finally {
       setSigningIn(false);
     }
@@ -204,6 +203,11 @@ export default function Header() {
                 >
                   {signingIn ? "…" : "Sign up"}
                 </button>
+                {signInError && (
+                  <p className="absolute right-4 top-full mt-1 max-w-xs rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 shadow">
+                    {signInError}
+                  </p>
+                )}
               </div>
             )
           )}

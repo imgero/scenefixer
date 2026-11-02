@@ -37,7 +37,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
 
-  const body = await req.json() as { type?: string; plan?: string; interval?: "monthly" | "annual"; pack?: string };
+  const body = await req.json() as { type?: string; plan?: string; interval?: "monthly" | "annual"; pack?: string; job?: string };
+  // The scan the buyer came from, so the success page can send them back to
+  // fix it. Only a job-id-shaped value goes into the URL.
+  const returnJob = typeof body.job === "string" && /^[a-z0-9]{10,40}$/.test(body.job) ? body.job : null;
   const appUrl = req.headers.get("origin") || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 
   // ── One-time credit pack purchase ───────────────────────────────────────
@@ -54,8 +57,8 @@ export async function POST(req: NextRequest) {
       customer: customerId,
       mode: "payment",
       line_items: [{ price: pack.priceId, quantity: 1 }],
-      success_url: `${appUrl}/pricing?success=credits&credits=${pack.credits}`,
-      cancel_url:  `${appUrl}/pricing?cancelled=1`,
+      success_url: `${appUrl}/pricing?success=credits&credits=${pack.credits}${returnJob ? `&job=${returnJob}` : ""}`,
+      cancel_url:  `${appUrl}/pricing?cancelled=1${returnJob ? `&job=${returnJob}` : ""}`,
       // Second, independent carrier of the uid. metadata is easy to lose —
       // any session Stripe creates outside this route (a Payment Link, the
       // hosted pricing table, a dashboard-created session) arrives with none —

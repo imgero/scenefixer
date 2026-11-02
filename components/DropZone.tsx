@@ -2,11 +2,10 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getAdditionalUserInfo, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { useAuth } from "@/lib/hooks/useAuth";
 import posthog from "posthog-js";
-import { registerLoopsContact } from "@/lib/loops";
+import { signInWithGoogle } from "@/lib/signIn";
 import { HelpLink } from "@/components/HelpDialog";
 import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
 
@@ -43,15 +42,10 @@ export default function DropZone() {
   const handleSignIn = async () => {
     posthog.capture("sign_in_clicked", { source: "dropzone" });
     setSigningIn(true);
+    setError(null);
     try {
-      const result = await signInWithPopup(auth, new GoogleAuthProvider());
-      const u = result.user;
-      posthog.identify(u.uid, { email: u.email ?? undefined });
-      if (getAdditionalUserInfo(result)?.isNewUser && u.email) {
-        registerLoopsContact(u.email, u.uid);
-      }
-    } catch (err) {
-      console.error("Sign-in error:", err);
+      const result = await signInWithGoogle("dropzone");
+      if (!result.ok && result.message) setError(result.message);
     } finally {
       setSigningIn(false);
     }
@@ -354,6 +348,7 @@ export default function DropZone() {
             </svg>
             {signingIn ? "Signing in…" : "Sign in with Google to continue"}
           </button>
+          {error && <p className="text-red-600 text-xs mt-3">{error}</p>}
           <p className="text-gray-400 text-xs mt-3">Free plan · no credit card required</p>
         </div>
       </div>
@@ -418,8 +413,9 @@ export default function DropZone() {
       )}
 
       <p className="text-center text-[11px] text-gray-500">
-        Free scans use Claude Haiku, a smaller and weaker model that can miss errors.
-        After it, you can deep scan with Claude Opus for 1 credit per shot.
+        Works on videos with two or more shots. The free scan uses our standard AI
+        model (Claude Haiku), which can miss things; for our most advanced model
+        (Claude Opus), run a deep scan with credits — 1 credit per shot.
       </p>
 
       <p className="text-center text-[11px] text-gray-400">

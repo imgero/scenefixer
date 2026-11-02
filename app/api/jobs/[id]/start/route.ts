@@ -76,6 +76,8 @@ export async function POST(
     await adminDb.collection("jobs").doc(jobId).update({
       inputVideoUrl,
       status: "decomposing",
+      // Modal compares its start time against this (queue_ms).
+      analysisRequestedAt: Date.now(),
     });
 
     // capture() alone only queues; the POST that ships it is not awaited, so a

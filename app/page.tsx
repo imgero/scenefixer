@@ -301,8 +301,9 @@ export default function HomePage() {
             Now in open beta — built on Runway Aleph and Claude.
           </p>
           <p className="text-gray-500 text-sm mb-3 max-w-md mx-auto">
-            Free scans run on Claude Haiku, a smaller and weaker model that can miss
-            errors. A deep scan with Claude Opus costs 1 credit per shot.
+            The free scan uses our standard AI model (Claude Haiku), which can miss
+            errors. For our most advanced model (Claude Opus), a deep scan costs 1
+            credit per shot.
           </p>
           <p className="text-gray-400 text-sm max-w-xl mx-auto mb-10 leading-relaxed">
             It&apos;s early, and detection won&apos;t always be perfect. But every fix runs on the footage you already have — so there&apos;s nothing to reroll, and nothing to lose by trying it on your worst clip.

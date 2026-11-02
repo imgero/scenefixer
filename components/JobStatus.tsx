@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { JobStatus } from "@/lib/types";
 
 const STEPS: { status: JobStatus; label: string }[] = [
@@ -14,14 +15,27 @@ const ORDER = STEPS.map((s) => s.status);
 
 const STATUS_BANNER: Partial<Record<JobStatus, { heading: string; sub: string }>> = {
   uploading:   { heading: "Uploading video…",          sub: "Hang tight while your file uploads." },
-  decomposing: { heading: "Splitting into shots…",     sub: "Transcoding and detecting scene cuts — takes 1–3 min." },
-  detecting:   { heading: "Scanning for inconsistencies…", sub: "Claude is reviewing every shot pair — takes 1–2 min." },
+  decomposing: { heading: "Splitting into shots…",     sub: "Finding the cuts in your video — usually under a minute." },
+  detecting:   { heading: "Scanning for inconsistencies…", sub: "Comparing your shots with each other." },
   fixing:      { heading: "Fixing with Runway Aleph…", sub: "AI is regenerating the affected frames — takes a few minutes per fix." },
   verifying:   { heading: "Verifying fixes…",          sub: "Checking that each error is resolved." },
 };
 
+/**
+ * Rough scan time from the shot count, in minutes.
+ *
+ * The old copy promised "1–3 min" then "1–2 min" whatever the video. Measured
+ * 14 Oct–2 Nov, decompose plus detect ran about a minute for 1–3 shots, 3–4
+ * for 6–18 and 6.5 for 35: roughly 60 s plus 9 s a shot.
+ */
+function scanMinutes(shots: number): number {
+  return Math.max(1, Math.round((60 + 9 * shots) / 60));
+}
+
 type Props = {
   status: JobStatus;
+  /** When the scan was requested (ms), for elapsed time and a slow-scan note. */
+  requestedAt?: number;
   shotCount?: number;
   shotsAnalyzed?: number;
   errorCount?: number;
@@ -46,10 +60,23 @@ type Props = {
   };
 };
 
-export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut, evidence, verificationPassed, creditsRefunded, fixesAttempted, fixesFailed }: Props) {
+export default function JobStatus({ status, requestedAt, shotCount, shotsAnalyzed, errorCount, errorMessage, fixTimedOut, evidence, verificationPassed, creditsRefunded, fixesAttempted, fixesFailed }: Props) {
   const currentIndex = ORDER.indexOf(status);
   const isError = status === "error";
   const banner = fixTimedOut ? null : STATUS_BANNER[status];
+
+  const scanning = status === "decomposing" || status === "detecting";
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!scanning) return;
+    const t = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, [scanning]);
+  const elapsedMin = scanning && requestedAt ? Math.floor((now - requestedAt) / 60_000) : null;
+  const expectedMin = status === "detecting" && shotCount ? scanMinutes(shotCount) : null;
+  // People left before results on 29 Oct and 1 Nov. Say plainly they may go,
+  // and say so louder once a scan runs well past what we'd expect.
+  const slow = elapsedMin !== null && elapsedMin >= Math.max(10, 2 * (expectedMin ?? 3));
 
   // The job page passes `shotCount={job.shotCount || undefined}`, so a real 0
   // arrives as undefined. Normalise here rather than change the call site.
@@ -131,7 +158,19 @@ export default function JobStatus({ status, shotCount, shotsAnalyzed, errorCount
               </svg>
               <div>
                 <p className="text-black font-semibold text-sm">{banner.heading}</p>
-                <p className="text-gray-500 text-xs mt-0.5">{banner.sub}</p>
+                <p className="text-gray-500 text-xs mt-0.5">
+                  {banner.sub}
+                  {expectedMin !== null &&
+                    ` ${shotCount} shots usually take about ${expectedMin} min.`}
+                  {elapsedMin !== null && elapsedMin >= 1 && ` Running for ${elapsedMin} min.`}
+                </p>
+                {scanning && (
+                  <p className={slow ? "text-amber-700 text-xs mt-1.5" : "text-gray-500 text-xs mt-1.5"}>
+                    {slow
+                      ? "This is taking longer than usual. You can close this page and come back later — the results will be here, and under Recent jobs on the home page."
+                      : "You can close this page — the results will be here when you come back, and under Recent jobs on the home page."}
+                  </p>
+                )}
               </div>
             </div>
           )}
