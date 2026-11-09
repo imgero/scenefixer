@@ -50,6 +50,17 @@ export default function RefundsPage() {
           </section>
 
           <section>
+            <h2 className="text-base font-semibold text-black mb-2">Studio (Seedance) Packs and Passes</h2>
+            <p className="text-gray-600">
+              Studio credits are separate from fix credits and never expire. If a video fails or
+              is blocked by the content filter, its credits are returned automatically. If you
+              haven&apos;t made any videos with a Studio pack or Unlimited* pass, you can request
+              a <strong>full refund within 14 days of buying it</strong>. Once videos have been
+              made with it, it is no longer refundable. Launch bonus credits have no cash value.
+            </p>
+          </section>
+
+          <section>
             <h2 className="text-base font-semibold text-black mb-2">How to Request a Refund</h2>
             <p className="text-gray-600">
               Email{" "}

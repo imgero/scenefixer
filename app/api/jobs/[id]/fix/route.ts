@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb, adminAuth } from "@/lib/firebase-admin";
 import { triggerFixPhase } from "@/lib/modal";
 import { PLAN_LIMITS, PAY_PER_FIX_OUTPUT } from "@/lib/types";
+import { FREE_FIX_MAX_SECONDS } from "@/lib/pricing";
 import { ensureEntitlement, MONTHLY_SPEND_CEILING } from "@/lib/entitlements";
 import { captureServer } from "@/lib/posthog-server";
 
@@ -25,7 +26,9 @@ async function getUidFromRequest(req: NextRequest): Promise<string | null> {
 }
 
 async function calcCreditsNeeded(
-  jobId: string
+  jobId: string,
+  // "Fix this" on one card: only these errors, whatever else is selected.
+  onlyIds: string[] | null = null
 ): Promise<{ total: number; perError: Map<string, number>; confirmedCount: number }> {
   // The SAME limit run_fix_phase applies in modal_app/app.py, and the same
   // query shape, so the two agree on which errors are in play.
@@ -41,13 +44,15 @@ async function calcCreditsNeeded(
   // deliberately written the same way and cross-referenced in both files.
   const MAX_ERRORS_PER_FIX = 8;
 
+  const confirmed = adminDb.collection("jobs").doc(jobId).collection("errors")
+    .where("userConfirmed", "==", true);
   const [errorsSnap, shotsSnap] = await Promise.all([
-    adminDb.collection("jobs").doc(jobId).collection("errors")
-      .where("userConfirmed", "==", true)
-      .limit(MAX_ERRORS_PER_FIX)
-      .get(),
+    (onlyIds ? confirmed : confirmed.limit(MAX_ERRORS_PER_FIX)).get(),
     adminDb.collection("jobs").doc(jobId).collection("shots").get(),
   ]);
+  const errorDocs = onlyIds
+    ? errorsSnap.docs.filter((d) => onlyIds.includes(d.id)).slice(0, MAX_ERRORS_PER_FIX)
+    : errorsSnap.docs;
 
   const shotDurations = new Map<string, number>();
   for (const s of shotsSnap.docs) {
@@ -57,7 +62,7 @@ async function calcCreditsNeeded(
 
   let total = 0;
   const perError = new Map<string, number>();
-  for (const e of errorsSnap.docs) {
+  for (const e of errorDocs) {
     const err = e.data();
     if (err.fixStatus === "fixed") continue;
     // An error detection has marked unrepairable cannot be fixed by editing the
@@ -74,7 +79,28 @@ async function calcCreditsNeeded(
     total += secs;
   }
 
-  return { total, perError, confirmedCount: errorsSnap.size };
+  return { total, perError, confirmedCount: errorDocs.length };
+}
+
+/**
+ * Deselect every confirmed, unfixed error outside `keep`.
+ *
+ * run_fix_phase fixes whatever is confirmed, so "Fix this" on one card has to
+ * leave only that card confirmed. Done after every check has passed, so a
+ * refused request never loses anyone's selections.
+ */
+async function confirmOnly(jobId: string, keep: Set<string>): Promise<void> {
+  const snap = await adminDb.collection("jobs").doc(jobId).collection("errors")
+    .where("userConfirmed", "==", true)
+    .get();
+  const batch = adminDb.batch();
+  let n = 0;
+  for (const d of snap.docs) {
+    if (keep.has(d.id) || d.data().fixStatus === "fixed") continue;
+    batch.update(d.ref, { userConfirmed: false });
+    n++;
+  }
+  if (n > 0) await batch.commit();
 }
 
 export async function POST(
@@ -84,6 +110,14 @@ export async function POST(
   const { id: jobId } = await params;
   const uid = await getUidFromRequest(req);
 
+  // Both optional. With no body this is the job page's "Fix N errors" button,
+  // as it always was.
+  const body = (await req.json().catch(() => ({}))) as { errorIds?: unknown; free?: unknown };
+  const onlyIds = Array.isArray(body.errorIds)
+    ? body.errorIds.filter((x): x is string => typeof x === "string").slice(0, 8)
+    : null;
+  const wantsFree = body.free === true;
+
   // Server-side proof the request arrived. `fix_requested` is client-side, so
   // without this we cannot tell "never reached the server" from "server threw".
   // Emitted before any check, keyed on uid when we have one so an
@@ -91,7 +125,13 @@ export async function POST(
   await captureServer({
     distinctId: uid ?? `anon_job_${jobId}`,
     event: "fix_request_received",
-    properties: { job_id: jobId, authenticated: !!uid, is_beta: false },
+    properties: {
+      job_id: jobId,
+      authenticated: !!uid,
+      is_beta: false,
+      single: !!onlyIds?.length,
+      free: wantsFree,
+    },
   });
 
   // Every non-success exit goes through here. The reason string is the whole
@@ -117,8 +157,13 @@ export async function POST(
     });
   }
 
+  // Set once the free fix is claimed and once the run is handed off, so a
+  // crash in between gives the free fix back rather than losing it.
+  let freeClaimed = false;
+  let launched = false;
+  const userRef = adminDb.collection("users").doc(uid);
+
   try {
-    const userRef = adminDb.collection("users").doc(uid);
     const userSnap = await userRef.get();
     const monthStart = startOfMonth(new Date());
 
@@ -163,6 +208,13 @@ export async function POST(
       return reject("job_not_found", 404, { error: "Job not found" });
     }
     const jobData = jobSnap.data()!;
+    // Only the person who uploaded may fix (and so re-select, or spend a free
+    // fix on) a job. Without this any signed-in user could post another
+    // person's job id, deselect their choices and take the job over, since
+    // the paid and free paths both write ownerUid.
+    if (jobData.ownerUid !== uid) {
+      return reject("not_owner", 403, { error: "Only the person who uploaded this video can fix it.", code: "not_owner" });
+    }
     const status = jobData.status;
     const isStaleFixing =
       status === "fixing" &&
@@ -214,7 +266,10 @@ export async function POST(
     }
 
     // Calculate credits needed (seconds of Runway output)
-    const { total: creditsNeeded, perError, confirmedCount } = await calcCreditsNeeded(jobId);
+    const { total: creditsNeeded, perError, confirmedCount } = await calcCreditsNeeded(
+      jobId,
+      onlyIds?.length ? onlyIds : null
+    );
     if (creditsNeeded === 0) {
       return reject(
         "no_unfixed_errors",
@@ -222,6 +277,99 @@ export async function POST(
         { error: "No unfixed errors to process" },
         { confirmed_count: confirmedCount }
       );
+    }
+
+    // Hands the run to Modal once the job is marked fixing. Shared by the free
+    // and the paid path.
+    const launch = () => {
+      launched = true;
+      after(async () => {
+        try {
+          await triggerFixPhase(jobId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Modal fix trigger failed for job ${jobId}: ${msg}`);
+          // Deliberately NOT fix_failed: fix_started already fired for this
+          // request, and the one-terminal-event-per-request invariant must hold.
+          // This is a later lifecycle stage — the handoff to Modal — so it gets
+          // its own event rather than a second terminal one.
+          await captureServer({
+            distinctId: uid,
+            event: "fix_trigger_failed",
+            properties: { job_id: jobId, error_message: msg },
+          });
+          const snap = await adminDb.collection("jobs").doc(jobId).get();
+          const current = snap.exists ? snap.data()?.status : undefined;
+          if (current !== "done") {
+            await adminDb.collection("jobs").doc(jobId).update({
+              status: "error",
+              errorMessage: msg,
+            });
+          }
+          // A free fix that never ran was not used.
+          if (wantsFree) {
+            await userRef.set({ freeFixUsed: false }, { merge: true });
+          }
+        }
+      });
+    };
+
+    // ── The one free fix ──────────────────────────────────────────────────
+    // One error, on a short shot, once per account, at 480p with a watermark:
+    // a preview of what a fix does, so the first payment is not blind.
+    if (wantsFree) {
+      if (perError.size !== 1 || creditsNeeded > FREE_FIX_MAX_SECONDS) {
+        return reject(
+          "free_fix_not_eligible",
+          409,
+          {
+            error: `The free fix is for one error on a shot of up to ${FREE_FIX_MAX_SECONDS} seconds.`,
+            code: "free_fix_not_eligible",
+          },
+          { credits_needed: creditsNeeded, error_count: perError.size }
+        );
+      }
+      const claimed = await adminDb.runTransaction(async (tx) => {
+        const snap = await tx.get(userRef);
+        if (snap.data()?.freeFixUsed) return false;
+        tx.set(userRef, { freeFixUsed: true, freeFixJobId: jobId }, { merge: true });
+        return true;
+      });
+      freeClaimed = claimed;
+      if (!claimed) {
+        return reject("free_fix_used", 409, {
+          error: "You've already used your free fix.",
+          code: "free_fix_used",
+        });
+      }
+
+      await confirmOnly(jobId, new Set(perError.keys()));
+      const batch = adminDb.batch();
+      for (const errorId of perError.keys()) {
+        batch.update(
+          adminDb.collection("jobs").doc(jobId).collection("errors").doc(errorId),
+          // Nothing to refund if it fails; the free fix itself is given back.
+          { creditsDeducted: 0, freeFix: true }
+        );
+      }
+      await batch.commit();
+
+      await adminDb.collection("jobs").doc(jobId).update({
+        status: "fixing",
+        fixingStartedAt: Date.now(),
+        ownerUid: uid,
+        outputQuality: PLAN_LIMITS.free.qualityLabel,
+        watermark: true,
+        freeFix: true,
+      });
+
+      await captureServer({
+        distinctId: uid,
+        event: "fix_started",
+        properties: { job_id: jobId, plan, free: true, credits_needed: creditsNeeded, from_monthly: 0, from_balance: 0 },
+      });
+      launch();
+      return NextResponse.json({ ok: true, free: true, creditsUsed: 0 });
     }
 
     // Hard monthly ceiling, checked before the grant/balance maths. Purchased
@@ -287,6 +435,8 @@ export async function POST(
     const output =
       plan === "free" && fromBalance > 0 ? PAY_PER_FIX_OUTPUT : PLAN_LIMITS[plan];
 
+    if (onlyIds?.length) await confirmOnly(jobId, new Set(perError.keys()));
+
     // Deduct credits
     const newUsedThisMonth = (monthResetAt < monthStart ? 0 : creditsUsedThisMonth) + fromMonthly;
     await userRef.set(
@@ -317,6 +467,8 @@ export async function POST(
       ownerUid: uid,
       outputQuality: output.qualityLabel,
       watermark: output.watermark,
+      // A paid run on a job whose earlier fix was the free one.
+      freeFix: false,
     });
 
     await captureServer({
@@ -328,39 +480,19 @@ export async function POST(
         credits_needed: creditsNeeded,
         from_monthly: fromMonthly,
         from_balance: fromBalance,
+        single: !!onlyIds?.length,
       },
     });
 
-    after(async () => {
-      try {
-        await triggerFixPhase(jobId);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`Modal fix trigger failed for job ${jobId}: ${msg}`);
-        // Deliberately NOT fix_failed: fix_started already fired for this
-        // request, and the one-terminal-event-per-request invariant must hold.
-        // This is a later lifecycle stage — the handoff to Modal — so it gets
-        // its own event rather than a second terminal one.
-        await captureServer({
-          distinctId: uid,
-          event: "fix_trigger_failed",
-          properties: { job_id: jobId, error_message: msg },
-        });
-        const snap = await adminDb.collection("jobs").doc(jobId).get();
-        const current = snap.exists ? snap.data()?.status : undefined;
-        if (current !== "done") {
-          await adminDb.collection("jobs").doc(jobId).update({
-            status: "error",
-            errorMessage: msg,
-          });
-        }
-      }
-    });
+    launch();
 
     return NextResponse.json({ ok: true, creditsUsed: creditsNeeded, creditsRemaining: monthlyLeft - fromMonthly + (creditsBalance - fromBalance) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`POST /api/jobs/${jobId}/fix error:`, err);
+    if (freeClaimed && !launched) {
+      await userRef.set({ freeFixUsed: false }, { merge: true }).catch(() => undefined);
+    }
     await captureServer({
       distinctId: uid,
       event: "fix_failed",

@@ -19,6 +19,7 @@ import Link from "next/link";
 import posthog from "posthog-js";
 import { HelpLink } from "@/components/HelpDialog";
 import { isAbandonedUpload } from "@/lib/uploads";
+import { exactCreditPrice, formatUsd, shotCredits, FREE_FIX_MAX_SECONDS } from "@/lib/pricing";
 
 type Props = {
   params: Promise<{ id: string }>;
@@ -68,6 +69,23 @@ export default function JobPage({ params }: Props) {
   const [reprocessing, setReprocessing] = useState(false);
   const [deepScanning, setDeepScanning] = useState(false);
   const [deepScanError, setDeepScanError] = useState<string | null>(null);
+  const [freeFixUsed, setFreeFixUsed] = useState(true);
+  const [buying, setBuying] = useState(false);
+  // Back from Stripe: ?paid=N or ?cancelled=1 (checkout's return URLs).
+  const [returnNotice, setReturnNotice] = useState<"paid" | "cancelled" | null>(null);
+  const [paidCredits, setPaidCredits] = useState(0);
+  const [scanVote, setScanVote] = useState<"up" | "down" | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paid = Number(params.get("paid"));
+    if (Number.isFinite(paid) && paid > 0) {
+      setReturnNotice("paid");
+      setPaidCredits(paid);
+    } else if (params.get("cancelled")) {
+      setReturnNotice("cancelled");
+    }
+  }, []);
 
   // Live-sync user plan + quota
   useEffect(() => {
@@ -80,6 +98,9 @@ export default function JobPage({ params }: Props) {
           setUserPlan((data.plan as Plan) ?? "free");
           setFixesUsed(data.creditsUsedThisMonth ?? 0);
           setCreditsBalance(data.creditsBalance ?? 0);
+          setFreeFixUsed(!!data.freeFixUsed);
+        } else {
+          setFreeFixUsed(false);
         }
       },
       (err) =>
@@ -247,21 +268,26 @@ export default function JobPage({ params }: Props) {
   const creditsAvailable = Math.max(0, monthlyLimit - fixesUsed) + creditsBalance;
   const creditsShort = !!user && fixCost > creditsAvailable;
 
-  const handleFix = async () => {
+  // With errorIds, fixes only those (the "Fix this" button on a card); with
+  // free, uses the account's one free preview fix.
+  const handleFix = async (opts: { errorIds?: string[]; free?: boolean } = {}) => {
     setFixError(null);
     setFixing(true);
     posthog.capture("fix_requested", {
       job_id: jobId,
-      confirmed_error_count: confirmedCount,
+      confirmed_error_count: opts.errorIds?.length ?? confirmedCount,
+      single: !!opts.errorIds,
+      free: !!opts.free,
     });
     try {
       const token = await auth.currentUser?.getIdToken();
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
 
       const res = await fetch(`/api/jobs/${jobId}/fix`, {
         method: "POST",
         headers,
+        body: JSON.stringify(opts),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -269,6 +295,8 @@ export default function JobPage({ params }: Props) {
           setFixError("Sign in to fix continuity errors.");
         } else if (data.code === "quota_exceeded") {
           setFixError(data.error + " Buy credits to fix these errors.");
+        } else if (data.code === "free_fix_used" || data.code === "free_fix_not_eligible") {
+          setFixError(data.error);
         } else {
           setFixError(data.error ?? "Fix failed. Please try again.");
         }
@@ -278,6 +306,90 @@ export default function JobPage({ params }: Props) {
       setFixError("Fix failed. Please try again.");
       setFixing(false);
     }
+  };
+
+  // Straight to Stripe for exactly the credits short, then back to this job.
+  // "Buy credits to fix" used to open the pricing page, where 3 people in the
+  // week to 9 Nov looked at $10–$100 packs and left.
+  const buyExact = async (credits: number, source: string) => {
+    if (buying) return;
+    setBuying(true);
+    const { cents } = exactCreditPrice(credits);
+    posthog.capture("buy_credits_to_fix_clicked", {
+      job_id: jobId,
+      credits_needed: credits,
+      balance: creditsAvailable,
+      cents,
+      source,
+    });
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ type: "exact", credits, job: jobId, source }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.url) {
+        window.location.href = data.url;
+        return;
+      }
+      setFixError(data.error ?? "Couldn't open checkout. Please try again.");
+    } catch {
+      setFixError("Couldn't open checkout. Please try again.");
+    } finally {
+      setBuying(false);
+    }
+  };
+
+  const errorCost = (e: ContinuityError): number => {
+    const targetId = (e.fixDirection ?? "aTob") === "aTob" ? e.shotBId : e.shotAId;
+    const target = shots.find((s) => s.id === targetId);
+    return target ? shotCredits(target.startMs, target.endMs) : 5;
+  };
+
+  const canStartFix = (status: string) =>
+    status === "awaiting_confirmation" || status === "done" || fixTimedOut;
+
+  // The control on a selected card: run it now, run it free, or pay for it.
+  const renderFixAction = (e: ContinuityError) => {
+    if (!user || !job || !canStartFix(job.status)) return null;
+    if (e.fixStatus !== "pending" && e.fixStatus !== "failed") return null;
+    const cost = errorCost(e);
+    const btn =
+      "px-4 py-2 rounded-lg bg-black hover:bg-gray-800 text-white text-sm font-semibold transition-colors disabled:opacity-50";
+    if (creditsAvailable >= cost) {
+      return (
+        <button className={btn} disabled={fixing} onClick={() => handleFix({ errorIds: [e.id] })}>
+          {fixing ? "Starting…" : `Fix this now · ${cost} credit${cost === 1 ? "" : "s"}`}
+        </button>
+      );
+    }
+    const price = exactCreditPrice(cost - creditsAvailable);
+    const freeOk = !freeFixUsed && cost <= FREE_FIX_MAX_SECONDS;
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        {freeOk && (
+          <button className={btn} disabled={fixing} onClick={() => handleFix({ errorIds: [e.id], free: true })}>
+            {fixing ? "Starting…" : "Fix this free"}
+          </button>
+        )}
+        <button
+          className={freeOk
+            ? "px-4 py-2 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 text-sm font-semibold transition-colors disabled:opacity-50"
+            : btn}
+          disabled={buying}
+          onClick={() => buyExact(cost - creditsAvailable, "error_card")}
+        >
+          {buying ? "Opening checkout…" : `Fix this for ${formatUsd(price.cents)}`}
+        </button>
+        <p className="w-full text-[11px] text-gray-500">
+          {freeOk
+            ? `Your first fix is free: a 480p preview with a watermark. Paid fixes are 720p, no watermark.`
+            : `${cost} credit${cost === 1 ? "" : "s"}, one per second of the ${cost}s shot. If the fix doesn't land, the credits come back.`}
+        </p>
+      </div>
+    );
   };
 
   const handleDownload = async () => {
@@ -521,18 +633,56 @@ export default function JobPage({ params }: Props) {
         </div>
       )}
 
-      {/* Beta notice */}
-      <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4">
-        <p className="text-xs text-amber-800">
-          <span className="font-semibold">Beta</span> — detection and fixes may not always be perfect.
-        </p>
-        <HelpLink
-          source="job_beta_notice"
-          className="text-xs text-amber-800 font-semibold underline underline-offset-2 hover:opacity-70 whitespace-nowrap shrink-0"
-        >
-          Tell us →
-        </HelpLink>
-      </div>
+      {returnNotice === "paid" && (
+        <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+          <b>{paidCredits} credits added.</b> Press <b>Fix this now</b> on the error you chose to start.
+        </div>
+      )}
+      {returnNotice === "cancelled" && (
+        <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+          Checkout cancelled. You haven&apos;t been charged.
+        </div>
+      )}
+
+      {/* One-tap feedback. The "Beta — Tell us →" form before it was opened
+          twice in the week to 9 Nov and sent zero times. */}
+      {job.status === "awaiting_confirmation" && job.scoreBefore !== undefined && (
+        <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
+          <p className="text-xs text-gray-700">
+            {scanVote ? "Thanks — that helps." : "Were these findings right?"}
+          </p>
+          {!scanVote ? (
+            <div className="flex gap-2">
+              {(["up", "down"] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => {
+                    setScanVote(v);
+                    posthog.capture("scan_feedback", {
+                      job_id: jobId,
+                      vote: v,
+                      error_count: job.errorCount,
+                      score_before: job.scoreBefore ?? null,
+                      scan_tier: job.scanTier ?? null,
+                    });
+                  }}
+                  className="px-3 py-1 rounded-lg border border-gray-200 bg-white hover:border-gray-400 text-base leading-none"
+                  aria-label={v === "up" ? "Yes, mostly right" : "No, mostly wrong"}
+                >
+                  {v === "up" ? "👍" : "👎"}
+                </button>
+              ))}
+            </div>
+          ) : scanVote === "down" ? (
+            <HelpLink
+              source="scan_feedback_down"
+              className="text-xs text-gray-700 font-semibold underline underline-offset-2 hover:opacity-70 whitespace-nowrap"
+            >
+              What did it get wrong? →
+            </HelpLink>
+          ) : null}
+        </div>
+      )}
 
       {isAbandonedUpload(job) && (
         <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-4">
@@ -737,22 +887,18 @@ export default function JobPage({ params }: Props) {
               {confirmedCount > 0 &&
                 (job.status === "awaiting_confirmation" || job.status === "done" || fixTimedOut) && (
                   quotaExhausted || creditsShort ? (
-                    <a
-                      href={`/pricing?need=${Math.max(1, fixCost - creditsAvailable)}&job=${jobId}`}
-                      onClick={() =>
-                        posthog.capture("buy_credits_to_fix_clicked", {
-                          job_id: jobId,
-                          credits_needed: fixCost,
-                          balance: creditsAvailable,
-                        })
-                      }
-                      className="px-5 py-2 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 font-semibold text-sm hover:bg-amber-100 transition-colors"
+                    <button
+                      onClick={() => buyExact(Math.max(1, fixCost - creditsAvailable), "fix_all")}
+                      disabled={buying}
+                      className="px-5 py-2 rounded-xl bg-black hover:bg-gray-800 text-white font-semibold text-sm transition-colors disabled:opacity-50"
                     >
-                      Buy credits to fix →
-                    </a>
+                      {buying
+                        ? "Opening checkout…"
+                        : `Fix ${confirmedCount} error${confirmedCount !== 1 ? "s" : ""} for ${formatUsd(exactCreditPrice(Math.max(1, fixCost - creditsAvailable)).cents)}`}
+                    </button>
                   ) : (
                     <button
-                      onClick={handleFix}
+                      onClick={() => handleFix()}
                       disabled={fixing || !user}
                       className="px-5 py-2 rounded-xl bg-black hover:bg-gray-800 text-white font-semibold text-sm transition-colors disabled:opacity-50"
                       title={!user ? "Sign in to fix errors" : undefined}
@@ -773,7 +919,14 @@ export default function JobPage({ params }: Props) {
               {confirmedCount > 8 ? "The first 8 of these fixes use" : "These fixes use"}{" "}
               <b className="text-black">{fixCost} credits</b> — one per second of each shot
               being fixed. You have {creditsAvailable}.
-              {creditsShort && ` You need ${fixCost - creditsAvailable} more.`}
+              {creditsShort && (
+                <>
+                  {" "}You need {fixCost - creditsAvailable} more.{" "}
+                  <Link href={`/pricing?need=${fixCost - creditsAvailable}&job=${jobId}`} className="underline underline-offset-2 hover:text-black">
+                    Packs are cheaper per credit →
+                  </Link>
+                </>
+              )}
             </p>
           )}
 
@@ -807,6 +960,7 @@ export default function JobPage({ params }: Props) {
             jobId={jobId}
             shots={shots}
             onAdjustLocation={(err) => setAdjustingError(err)}
+            renderFixAction={renderFixAction}
           />
         </div>
       )}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Image from "next/image";
 import { doc, updateDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -14,6 +14,12 @@ type Props = {
   shotAKeyframe: string;
   shotBKeyframe: string;
   onAdjustLocation?: (error: ContinuityError) => void;
+  /**
+   * Fix just this error, priced. Shown once a fix is chosen, so the step after
+   * choosing is on the card itself: people chose fixes and then never found
+   * the Fix button at the top of the list (0 fixes from 3 who chose, 1–9 Nov).
+   */
+  fixAction?: ReactNode;
 };
 
 const SEVERITY_COLORS = {
@@ -84,6 +90,7 @@ export default function ErrorCard({
   shotAKeyframe,
   shotBKeyframe,
   onAdjustLocation,
+  fixAction,
 }: Props) {
   const errorRef = doc(db, "jobs", jobId, "errors", error.id);
 
@@ -652,6 +659,8 @@ export default function ErrorCard({
                 </button>
               </div>
             )}
+
+            {isSelected && !notRepairable && fixAction && <div className="mt-3">{fixAction}</div>}
           </div>
 
           {hasBbox && !isSelected && (
@@ -703,9 +712,12 @@ export default function ErrorCard({
                 <div className={error.originalClipUrl ? "" : "col-span-2"}>
                   <div className="flex items-center justify-between mb-1">
                     <p className="text-[10px] text-emerald-700 uppercase tracking-wider">After (Aleph)</p>
-                    <a href={error.fixedClipUrl} download className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-900 underline underline-offset-2 transition-colors">
-                      Download ↓
-                    </a>
+                    {/* The free fix is a preview; its download is the watermarked video. */}
+                    {!error.freeFix && (
+                      <a href={error.fixedClipUrl} download className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-900 underline underline-offset-2 transition-colors">
+                        Download ↓
+                      </a>
+                    )}
                   </div>
                   <video src={error.fixedClipUrl} controls loop muted className="w-full rounded-lg bg-black aspect-video" />
                 </div>

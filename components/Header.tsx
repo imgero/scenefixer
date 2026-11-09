@@ -120,6 +120,9 @@ export default function Header() {
           <Link href="/pricing" className="text-sm text-gray-500 hover:text-black transition-colors">
             Pricing
           </Link>
+          <Link href="/studio" className="text-sm text-gray-500 hover:text-black transition-colors">
+            Seedance videos
+          </Link>
         </nav>
 
         {/* Right: user section */}

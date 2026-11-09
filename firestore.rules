@@ -57,19 +57,23 @@ service cloud.firestore {
       //
       // `emailDeliverable` and `emailVerified` are here for the same reason:
       // they gate whether an account may spend at all, so they must only ever
-      // be written by the server.
+      // be written by the server. `freeFixUsed` too: clearing it from the
+      // browser would hand out another free fix. The `studio*` fields are bought
+      // Studio credits and the Unlimited* pass, so the same applies.
       allow create: if request.auth != null
         && request.auth.uid == uid
         && !request.resource.data.keys()
             .hasAny(['plan', 'creditsUsedThisMonth', 'monthResetAt', 'stripeCustomerId',
                      'creditsBalance', 'emailDeliverable', 'emailVerified',
-                     'scansToday', 'scanDate']);
+                     'scansToday', 'scanDate', 'freeFixUsed', 'freeFixReturned',
+                     'studioCredits', 'studioPassUntil', 'studioFastDay', 'studioFastCount']);
       allow update: if request.auth != null
         && request.auth.uid == uid
         && !request.resource.data.diff(resource.data).affectedKeys()
             .hasAny(['plan', 'creditsUsedThisMonth', 'monthResetAt', 'stripeCustomerId',
                      'creditsBalance', 'emailDeliverable', 'emailVerified',
-                     'scansToday', 'scanDate']);
+                     'scansToday', 'scanDate', 'freeFixUsed', 'freeFixReturned',
+                     'studioCredits', 'studioPassUntil', 'studioFastDay', 'studioFastCount']);
       allow delete: if false;
     }
 

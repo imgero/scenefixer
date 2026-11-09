@@ -15,6 +15,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.9,
     },
     {
+      url: "https://scenefixer.com/studio",
+      lastModified: new Date(),
+      changeFrequency: "weekly",
+      priority: 0.9,
+    },
+    {
       url: "https://scenefixer.com/how-it-works",
       lastModified: new Date(),
       changeFrequency: "monthly",

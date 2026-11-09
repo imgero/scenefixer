@@ -60,16 +60,37 @@ export async function POST(
         // Also checked in /api/jobs before the upload; checked again here
         // because a retry reuses its job and skips that route.
         const { today, scansToday, limit, reached } = await dailyScanStatus(uid, ent);
-        if (reached) {
+        const extraCredits = typeof jobData.extraScanCredits === "number" ? jobData.extraScanCredits : 0;
+        if (reached && extraCredits > 0) {
+          // The scan the owner chose to pay for in /api/jobs. Charged now that
+          // the file has arrived, once (a retry reuses the job); refunded by
+          // Modal if the analysis fails.
+          const userRef = adminDb.collection("users").doc(uid);
+          const charged = !!jobData.extraScanCharged || await adminDb.runTransaction(async (tx) => {
+            const snap = await tx.get(userRef);
+            const balance = snap.data()?.creditsBalance ?? 0;
+            if (balance < extraCredits) return false;
+            tx.update(userRef, { creditsBalance: balance - extraCredits });
+            tx.update(adminDb.collection("jobs").doc(jobId), { extraScanCharged: true });
+            return true;
+          });
+          if (!charged) {
+            return NextResponse.json(
+              { error: "You don't have a credit left for another scan today.", code: "scan_limit" },
+              { status: 402 }
+            );
+          }
+        } else if (reached) {
           return NextResponse.json(
             { error: scanLimitMessage(limit), code: "scan_limit" },
             { status: 429 }
           );
+        } else {
+          await adminDb.collection("users").doc(uid).set(
+            { scanDate: today, scansToday: scansToday + 1 },
+            { merge: true }
+          );
         }
-        await adminDb.collection("users").doc(uid).set(
-          { scanDate: today, scansToday: scansToday + 1 },
-          { merge: true }
-        );
       }
     }
 

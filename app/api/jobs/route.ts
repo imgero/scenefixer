@@ -8,6 +8,7 @@ import { notifyOwner } from "@/lib/notify";
 import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
 import { ensureEntitlement } from "@/lib/entitlements";
 import { dailyScanStatus, scanLimitMessage } from "@/lib/scanLimit";
+import { EXTRA_SCAN_CREDITS } from "@/lib/pricing";
 
 export async function POST(req: NextRequest) {
   const authHeader = req.headers.get("Authorization");
@@ -33,15 +34,27 @@ export async function POST(req: NextRequest) {
       email: userRecord?.email ?? null,
       emailVerified: userRecord?.emailVerified ?? false,
     });
+    const { filename, contentType, userHint, extraScan } = await req.json();
+
+    // Over the limit, a scan can still be paid for with a credit. Nothing is
+    // charged here: /start charges it, so an upload that never finishes costs
+    // nothing. Before this, the only answer was "come back tomorrow" — one
+    // user on 5 Nov tried three times in a minute, then came back 7 hours
+    // later.
     const { limit, reached } = await dailyScanStatus(uid, ent);
-    if (reached) {
+    const paidExtra = reached && extraScan === true && ent.creditsBalance >= EXTRA_SCAN_CREDITS;
+    if (reached && !paidExtra) {
       return NextResponse.json(
-        { error: scanLimitMessage(limit), code: "scan_limit" },
+        {
+          error: scanLimitMessage(limit),
+          code: "scan_limit",
+          // So the upload box can offer the paid scan, or the credits for it.
+          balance: ent.creditsBalance,
+          extraScanCredits: EXTRA_SCAN_CREDITS,
+        },
         { status: 429 }
       );
     }
-
-    const { filename, contentType, userHint } = await req.json();
 
     if (!filename || !contentType) {
       return NextResponse.json(
@@ -77,6 +90,7 @@ export async function POST(req: NextRequest) {
         errorCount: 0,
         fixedCount: 0,
         ...(cleanedHint ? { userHint: cleanedHint } : {}),
+        ...(paidExtra ? { extraScanCredits: EXTRA_SCAN_CREDITS } : {}),
         createdAt: FieldValue.serverTimestamp(),
       });
 
@@ -97,6 +111,7 @@ export async function POST(req: NextRequest) {
           has_hint: !!cleanedHint,
           content_type: contentType,
           is_beta: false,
+          paid_extra_scan: paidExtra,
         },
       });
 

@@ -22,14 +22,16 @@ export const STRIPE_PRICES: Record<string, { monthly: string; annual: string }> 
   },
 };
 
-// One-time credit packs: 1 credit = 1 second of Runway output fixed.
-// Create each as a one-time Stripe product and paste the price_xxx IDs below.
-export const CREDIT_PACKS: { pack: string; credits: number; price: number; label: string; priceId: string }[] = [
-  { pack: "10",  credits: 15,  price: 10,  label: "",           priceId: process.env.STRIPE_PRICE_CREDIT_10  ?? "" },
-  { pack: "25",  credits: 40,  price: 25,  label: "save ~6%",   priceId: process.env.STRIPE_PRICE_CREDIT_25  ?? "" },
-  { pack: "50",  credits: 85,  price: 50,  label: "save ~12%",  priceId: process.env.STRIPE_PRICE_CREDIT_50  ?? "" },
-  { pack: "100", credits: 190, price: 100, label: "save ~21%",  priceId: process.env.STRIPE_PRICE_CREDIT_100 ?? "" },
-];
+// The Stripe Prices the credit packs were first sold under. Checkout now
+// prices every pack inline (lib/pricing.ts) so the amount and the credit count
+// on Stripe's page always match ours; these stay only so the webhook still
+// recognises a session created against one of them.
+const LEGACY_CREDIT_PRICE_IDS = [
+  process.env.STRIPE_PRICE_CREDIT_10,
+  process.env.STRIPE_PRICE_CREDIT_25,
+  process.env.STRIPE_PRICE_CREDIT_50,
+  process.env.STRIPE_PRICE_CREDIT_100,
+].filter((id): id is string => !!id);
 
 /**
  * Every price id this product sells, subscriptions and credit packs alike.
@@ -44,7 +46,7 @@ export const CREDIT_PACKS: { pack: string; credits: number; price: number; label
 export function isOurPriceId(priceId: string | null | undefined): boolean {
   if (!priceId) return false;
   if (planFromPriceId(priceId)) return true;
-  return CREDIT_PACKS.some((p) => p.priceId && p.priceId === priceId);
+  return LEGACY_CREDIT_PRICE_IDS.includes(priceId);
 }
 
 export function planFromPriceId(priceId: string): Plan | null {
