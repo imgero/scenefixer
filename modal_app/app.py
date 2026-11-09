@@ -112,6 +112,69 @@ def _refund_daily_scan(owner_uid: str | None) -> bool:
     return False
 
 
+def _refund_extra_scan(job_id: str, owner_uid: str | None) -> bool:
+    """
+    Give back the credit(s) a paid extra scan cost (/api/jobs/[id]/start).
+
+    Clears extraScanCharged in the same transaction, so the refund happens once
+    per charge: a retry of the same job is charged again by /start, and only
+    then can it be refunded again. Without that, every failed retry of an
+    unreadable file refunded another credit that was never taken.
+    """
+    if not owner_uid:
+        return False
+    try:
+        from google.cloud import firestore
+        from google.cloud.firestore_v1 import Increment
+        from modal_app.firebase import get_db
+
+        db = get_db()
+        job_ref = db.collection("jobs").document(job_id)
+        user_ref = db.collection("users").document(owner_uid)
+
+        @firestore.transactional
+        def _tx(tx) -> bool:
+            job = job_ref.get(transaction=tx).to_dict() or {}
+            if not job.get("extraScanCharged"):
+                return False
+            credits = int(job.get("extraScanCredits") or 1)
+            tx.update(job_ref, {"extraScanCharged": False})
+            tx.update(user_ref, {"creditsBalance": Increment(credits)})
+            return True
+
+        return _tx(db.transaction())
+    except Exception as exc:
+        print(f"extra scan refund failed for {owner_uid}: {exc}")
+    return False
+
+
+def _return_free_fix(job_id: str) -> None:
+    """
+    A free fix that fixed nothing was not a preview of anything, so the account
+    gets it back, once. The route marks the job freeFix and the user
+    freeFixUsed. Only once, because every attempt spends real Runway credits:
+    returning it after every unverified run let one account retry an
+    unfixable error for free indefinitely.
+    """
+    try:
+        from modal_app.firebase import get_db
+
+        db = get_db()
+        job = db.collection("jobs").document(job_id).get().to_dict() or {}
+        uid = job.get("ownerUid")
+        if not job.get("freeFix") or not uid:
+            return
+        user_ref = db.collection("users").document(uid)
+        user = user_ref.get().to_dict() or {}
+        if user.get("freeFixReturned"):
+            print(f"free fix not returned to {uid}: already returned once")
+            return
+        user_ref.update({"freeFixUsed": False, "freeFixReturned": True})
+        print(f"free fix returned to {uid}")
+    except Exception as exc:
+        print(f"free fix return failed for {job_id}: {exc}")
+
+
 # Every secret named here must already exist, or `modal deploy` fails before it
 # starts. So adding one is a deploy-breaking change until it is created.
 #
@@ -302,7 +365,12 @@ def run_process_job(job_id: str, deep_scan: bool = False):
         # result gives it back: an unreadable file or a crash is no reason to
         # lock someone out until midnight (17 Oct: a truncated upload burned a
         # free scan, and three good re-exports were then refused).
-        scan_refunded = False if finished else _refund_daily_scan(current.get("ownerUid"))
+        # A paid extra scan (past the daily limit) cost a credit, not a scan.
+        scan_refunded = (
+            False if finished
+            else _refund_extra_scan(job_id, current.get("ownerUid")) if current.get("extraScanCharged")
+            else _refund_daily_scan(current.get("ownerUid"))
+        )
 
         if not finished:
             unreadable = isinstance(e, subprocess.CalledProcessError)
@@ -523,6 +591,7 @@ def run_fix_phase(job_id: str):
                 "verificationPassed": False,
                 "creditsRefunded": credits_refunded,
             })
+            _return_free_fix(job_id)
             try:
                 from modal_app import analytics
                 analytics.capture(
@@ -633,6 +702,8 @@ def run_fix_phase(job_id: str):
                 )
 
         db.collection("jobs").document(job_id).update(done_update)
+        if not verification_passed:
+            _return_free_fix(job_id)
 
         if not verification_passed or failed:
             try:

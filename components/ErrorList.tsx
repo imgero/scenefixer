@@ -1,6 +1,7 @@
 "use client";
 
 import { useErrors } from "@/lib/hooks/useErrors";
+import type { ReactNode } from "react";
 import type { Shot, ContinuityError } from "@/lib/types";
 import ErrorCard from "./ErrorCard";
 
@@ -8,6 +9,8 @@ type Props = {
   jobId: string;
   shots: Shot[];
   onAdjustLocation?: (error: ContinuityError) => void;
+  /** The job page's "Fix this" control for a selected error. */
+  renderFixAction?: (error: ContinuityError) => ReactNode;
 };
 
 const SEVERITY_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
@@ -22,7 +25,7 @@ function sortErrors(errors: ContinuityError[]): ContinuityError[] {
   });
 }
 
-export default function ErrorList({ jobId, shots, onAdjustLocation }: Props) {
+export default function ErrorList({ jobId, shots, onAdjustLocation, renderFixAction }: Props) {
   const { errors, loading } = useErrors(jobId);
   const shotMap = Object.fromEntries(shots.map((s) => [s.id, s]));
 
@@ -59,6 +62,7 @@ export default function ErrorList({ jobId, shots, onAdjustLocation }: Props) {
             shotAKeyframe={shotA.keyframeUrl}
             shotBKeyframe={shotB.keyframeUrl}
             onAdjustLocation={onAdjustLocation}
+            fixAction={renderFixAction?.(err)}
           />
         );
       })}

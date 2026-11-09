@@ -5,6 +5,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import type Stripe from "stripe";
 import { captureServer } from "@/lib/posthog-server";
 import { notifyOwner } from "@/lib/notify";
+import { grantStudioPurchase } from "@/lib/studio/server";
 
 export const config = { api: { bodyParser: false } };
 
@@ -153,19 +154,58 @@ export async function POST(req: NextRequest) {
 
     const { uid, via: uidVia } = await resolveUid(session);
 
+    // Studio video pack or Unlimited* pass
+    if (session.metadata?.type === "studio" && uid) {
+      const qty = parseInt(session.metadata.quantity ?? "0", 10);
+      const passDays = parseInt(session.metadata.pass_days ?? "0", 10) || 0;
+      // Stripe retries a webhook it didn't see answered; grant each session once.
+      const first = (qty > 0 || passDays > 0) && (await grantStudioPurchase(session.id, uid, qty, passDays));
+      if (first) {
+        await captureServer({
+          distinctId: uid,
+          event: "studio_purchased",
+          properties: {
+            pack: session.metadata.pack ?? null,
+            quantity: qty,
+            pass_days: passDays,
+            amount_total: session.amount_total,
+            stripe_event_id: event.id,
+            source: session.metadata.source ?? null,
+          },
+        });
+        await notifyOwner(
+          `[Scene Fixer] Studio sale: $${((session.amount_total ?? 0) / 100).toFixed(2)}`,
+          `Pack: ${session.metadata.pack}\nCredits: ${qty}\nPass days: ${passDays}\nUser: ${uid}\nEmail: ${session.customer_details?.email ?? "(none)"}`
+        ).catch(() => undefined);
+      }
+      return NextResponse.json({ received: true });
+    }
+
     // One-time credit purchase
     if (session.metadata?.type === "credits" && uid) {
       const qty = parseInt(session.metadata.quantity ?? "0", 10);
-      if (qty > 0) {
-        const { FieldValue } = await import("firebase-admin/firestore");
-        await adminDb.collection("users").doc(uid).set(
-          { creditsBalance: FieldValue.increment(qty) },
-          { merge: true }
-        );
+      // Granted once per checkout session. Stripe redelivers an event it
+      // didn't see answered in time, and each delivery used to add the
+      // credits again; the marker is written in the same transaction.
+      const granted = qty > 0 && (await adminDb.runTransaction(async (tx) => {
+        const marker = adminDb.collection("credit_purchases").doc(session.id);
+        if ((await tx.get(marker)).exists) return false;
+        tx.create(marker, { uid, qty, at: Date.now() });
+        tx.set(adminDb.collection("users").doc(uid), { creditsBalance: FieldValue.increment(qty) }, { merge: true });
+        return true;
+      }));
+      if (granted) {
         await captureServer({
           distinctId: uid,
           event: "credits_purchased",
-          properties: { quantity: qty, amount_total: session.amount_total, stripe_event_id: event.id },
+          properties: {
+            quantity: qty,
+            amount_total: session.amount_total,
+            stripe_event_id: event.id,
+            purchase: session.metadata.purchase ?? null,
+            job_id: session.metadata.job ?? null,
+            source: session.metadata.source ?? null,
+          },
         });
       }
       return NextResponse.json({ received: true });

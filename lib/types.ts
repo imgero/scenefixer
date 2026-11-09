@@ -98,6 +98,11 @@ export type Job = {
   errorMessage?: string;
   isPublic?: boolean;
   betaToken?: string;
+  /** The latest fix run was the account's free preview fix. */
+  freeFix?: boolean;
+  /** A scan past the daily limit, paid for with credits. */
+  extraScanCredits?: number;
+  extraScanCharged?: boolean;
 };
 
 export type Shot = {
@@ -196,6 +201,8 @@ export type ContinuityError = {
   };
   /** The original exception text, kept when `errorMessage` was replaced. */
   rawErrorMessage?: string;
+  /** Fixed as the account's one free preview (480p, watermark). */
+  freeFix?: boolean;
   /** Overrides automatic engine routing — used to retry on a different model. */
   fixEngine?: string;
   fixEngineUsed?: string;
@@ -292,5 +299,7 @@ export type UserDoc = {
   monthResetAt: number;
   stripeCustomerId?: string;
   creditsBalance?: number;       // extra seconds purchased via one-time packs
+  /** The one free preview fix has been spent. Server-written only. */
+  freeFixUsed?: boolean;
   createdAt: number;
 };

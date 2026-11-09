@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/firebase";
 import { useAuth } from "@/lib/hooks/useAuth";
@@ -8,6 +8,7 @@ import posthog from "posthog-js";
 import { signInWithGoogle } from "@/lib/signIn";
 import { HelpLink } from "@/components/HelpDialog";
 import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
+import { exactCreditPrice, formatUsd } from "@/lib/pricing";
 
 const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 const ACCEPTED = ["video/mp4", "video/quicktime"];
@@ -28,6 +29,17 @@ export default function DropZone() {
   const [hint, setHint] = useState("");
   const [signingIn, setSigningIn] = useState(false);
   const busy = useRef(false);
+  // Over the daily limit: the file they tried, and whether a credit can pay
+  // for the scan now. Set from the refusal; cleared on the next attempt.
+  const [limitOffer, setLimitOffer] = useState<{ file: File; balance: number; credits: number } | null>(null);
+  const [buying, setBuying] = useState(false);
+  const [creditsAdded, setCreditsAdded] = useState<number | null>(null);
+
+  // Back from buying credits for a scan (checkout's success_url).
+  useEffect(() => {
+    const n = Number(new URLSearchParams(window.location.search).get("credits_added"));
+    if (Number.isFinite(n) && n > 0) setCreditsAdded(n);
+  }, []);
   // The job a failed attempt created, kept so a retry of the same file
   // uploads into it instead of abandoning it. See handleFile.
   const pendingUpload = useRef<{
@@ -52,8 +64,9 @@ export default function DropZone() {
   };
 
   const handleFile = useCallback(
-    async (file: File) => {
+    async (file: File, opts: { extraScan?: boolean } = {}) => {
       setError(null);
+      setLimitOffer(null);
 
       if (!ACCEPTED.includes(file.type)) {
         setError("Only MP4 and MOV files are supported.");
@@ -106,6 +119,7 @@ export default function DropZone() {
               filename: file.name,
               contentType: file.type,
               userHint: trimmedHint || undefined,
+              extraScan: opts.extraScan || undefined,
             }),
           }).catch((err) => {
             // The request can land and create the job while the response is
@@ -123,6 +137,11 @@ export default function DropZone() {
             });
             if (data.code === "scan_limit" && data.error) {
               setError(data.error);
+              setLimitOffer({
+                file,
+                balance: typeof data.balance === "number" ? data.balance : 0,
+                credits: typeof data.extraScanCredits === "number" ? data.extraScanCredits : 1,
+              });
             } else {
               setError("Upload failed. Please try again.");
             }
@@ -238,6 +257,8 @@ export default function DropZone() {
           // try again." and people retried the same file into the same refusal.
           if (startData.code === "scan_limit" && startData.error) {
             setError(startData.error);
+            // The upload already landed, so a paid retry reuses this job.
+            pendingUpload.current = null;
             setProgress(null);
             setStage("");
             return;
@@ -281,6 +302,31 @@ export default function DropZone() {
     },
     [router, hint]
   );
+
+  // Credits for one more scan today, bought from the refusal itself.
+  const buyScanCredits = async (credits: number) => {
+    if (buying) return;
+    setBuying(true);
+    posthog.capture("extra_scan_buy_clicked", { credits });
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ type: "exact", credits, source: "scan_limit" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.url) {
+        window.location.href = data.url;
+        return;
+      }
+      setError("Couldn't open checkout. Please try again.");
+    } catch {
+      setError("Couldn't open checkout. Please try again.");
+    } finally {
+      setBuying(false);
+    }
+  };
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -408,9 +454,38 @@ export default function DropZone() {
         <p className="text-gray-500 text-sm">MP4 or MOV · 200MB max</p>
       </div>
 
+      {creditsAdded && !error && (
+        <p className="text-emerald-700 text-sm text-center">
+          {creditsAdded} credits added. Drop your video again to scan it.
+        </p>
+      )}
+
       {error && (
         <p className="text-red-600 text-sm text-center">{error}</p>
       )}
+
+      {limitOffer && (() => {
+        const offer = exactCreditPrice(limitOffer.credits);
+        return limitOffer.balance >= limitOffer.credits ? (
+          <button
+            onClick={() => {
+              posthog.capture("extra_scan_clicked", { credits: limitOffer.credits, balance: limitOffer.balance });
+              handleFile(limitOffer.file, { extraScan: true });
+            }}
+            className="self-center bg-black hover:bg-gray-800 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-colors"
+          >
+            Scan it now for {limitOffer.credits} credit{limitOffer.credits === 1 ? "" : "s"} (you have {limitOffer.balance})
+          </button>
+        ) : (
+          <button
+            onClick={() => buyScanCredits(limitOffer.credits)}
+            disabled={buying}
+            className="self-center bg-black hover:bg-gray-800 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-colors disabled:opacity-50"
+          >
+            {buying ? "Opening checkout…" : `Don't wait: ${offer.credits} credits for ${formatUsd(offer.cents)}`}
+          </button>
+        );
+      })()}
 
       <p className="text-center text-[11px] text-gray-500">
         Works on videos with two or more shots. The free scan uses our standard AI

@@ -9,6 +9,7 @@ import posthog from "posthog-js";
 import { signInWithGoogle } from "@/lib/signIn";
 import { FREE_SCANS_PER_DAY } from "@/lib/types";
 import { HelpLink } from "@/components/HelpDialog";
+import { CREDIT_PACKS, exactCreditPrice, formatUsd, EXACT_CENTS_PER_CREDIT, EXACT_MIN_CENTS } from "@/lib/pricing";
 
 /**
  * Credit packs are the only thing sold.
@@ -29,12 +30,6 @@ const FREE_TIER = {
   scansPerDay: FREE_SCANS_PER_DAY,
 };
 
-const CREDIT_PACKS = [
-  { pack: "10",  price: 10,  credits: 15,  label: "" },
-  { pack: "25",  price: 25,  credits: 40,  label: "save ~6%" },
-  { pack: "50",  price: 50,  credits: 85,  label: "save ~12%" },
-  { pack: "100", price: 100, credits: 190, label: "best value" },
-];
 
 export default function PricingPage() {
   return (
@@ -109,6 +104,7 @@ function PricingContent() {
     return result.ok;
   };
 
+  // pack "exact" buys exactly `need` credits.
   const handleBuyPack = async (pack: string) => {
     if (!(await ensureSignedIn())) return;
     setLoading(`credits_${pack}`);
@@ -117,7 +113,11 @@ function PricingContent() {
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ type: "credits", pack, job: returnJob ?? undefined }),
+        body: JSON.stringify(
+          pack === "exact"
+            ? { type: "exact", credits: need, job: returnJob ?? undefined, source: "pricing_need" }
+            : { type: "credits", pack, job: returnJob ?? undefined }
+        ),
       });
       const data = await res.json();
       if (data.url) {
@@ -173,6 +173,17 @@ function PricingContent() {
                 ? `The $${coveringPack.price} pack (${coveringPack.credits} credits) covers it.`
                 : `Even the $${coveringPack.price} pack doesn't cover all of it — select fewer fixes, or fix in two rounds.`}
             </p>
+            {need <= 300 && (
+              <button
+                onClick={() => handleBuyPack("exact")}
+                disabled={loading === "credits_exact"}
+                className="mt-3 w-full rounded-xl bg-black hover:bg-gray-800 text-white text-sm font-semibold px-4 py-2.5 transition-colors disabled:opacity-50"
+              >
+                {loading === "credits_exact"
+                  ? "Redirecting…"
+                  : `Just buy what you need: ${exactCreditPrice(need).credits} credits for ${formatUsd(exactCreditPrice(need).cents)}`}
+              </button>
+            )}
             {returnJob && (
               <a href={`/job/${returnJob}`} className="inline-block mt-2 text-xs font-semibold underline underline-offset-2">
                 ← Back to your scan
@@ -254,8 +265,10 @@ function PricingContent() {
               mistake. Fixing errors in shots of 5, 8 and 12 seconds uses 25 credits.
             </p>
             <p className="mt-2">
-              Most shots run 5–15 seconds, so 15 credits usually covers one or two fixes.
-              Scan first, it&apos;s free, to see your shots before you buy.
+              Most shots run 3–15 seconds, so 20 credits usually covers two or three fixes.
+              Scan first, it&apos;s free: the scan shows each fix&apos;s price, and you can pay for
+              just that fix ({formatUsd(EXACT_CENTS_PER_CREDIT)} a credit, {formatUsd(EXACT_MIN_CENTS)} minimum).
+              Your first fix is free as a 480p preview.
             </p>
           </div>
 

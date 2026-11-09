@@ -99,17 +99,32 @@ def capture(
             props["duration_ms"] = duration_ms
         props.update(properties or {})
 
-        client.capture(
-            distinct_id=_distinct_id(job),
-            event=event,
-            properties=props,
-            # Without an explicit timestamp PostHog dates the event when its
-            # ingestion pipeline receives it. That lag is variable, so events
-            # captured seconds apart can land milliseconds apart and out of
-            # order — which is what made unrelated server-side events read as
-            # double-fires. Stamp at capture time instead.
-            timestamp=datetime.now(timezone.utc),
-        )
-        client.flush()
+        stamp = datetime.now(timezone.utc)
+        # Twice at most. On 3 and 4 Nov the 60- and 41-shot scans finished
+        # (the owner's emails prove it) but job_analysis_completed never
+        # arrived, while short scans in the same build logged fine. The worker
+        # captures job_worker_started at t=0 and nothing else until detection
+        # ends; after 6-9 idle minutes that first connection had gone stale and
+        # the one send was lost. A second attempt opens a fresh one.
+        for attempt in (1, 2):
+            try:
+                client.capture(
+                    distinct_id=_distinct_id(job),
+                    event=event,
+                    properties=props,
+                    # Without an explicit timestamp PostHog dates the event when its
+                    # ingestion pipeline receives it. That lag is variable, so events
+                    # captured seconds apart can land milliseconds apart and out of
+                    # order — which is what made unrelated server-side events read as
+                    # double-fires. Stamp at capture time instead.
+                    timestamp=stamp,
+                )
+                client.flush()
+                break
+            except Exception as exc:
+                print(f"analytics: {event} capture attempt {attempt} failed: {exc}")
+                if attempt == 2:
+                    raise
+                time.sleep(1)
     except Exception as exc:
         print(f"analytics: {event} capture failed: {exc}")
