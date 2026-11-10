@@ -171,7 +171,7 @@ export default function Header() {
         </nav>
 
         {/* Right: user section */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {/* Phones have no center nav; most visitors are on one. */}
           <Link href="/studio" className="md:hidden flex items-center gap-1.5 text-sm text-gray-600 hover:text-black transition-colors">
             Studio
