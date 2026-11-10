@@ -37,7 +37,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const job = (await ref.get()).data()!;
   const url = `https://scenefixer.com/job/${jobId}`;
   await Promise.all([
-    loopsEvent(uid, "scan_feedback", { vote, errorCount: job.errorCount ?? 0, jobUrl: url }, { lastScanVote: vote }),
+    loopsEvent(uid, `scan_feedback_${vote}`, { vote, errorCount: job.errorCount ?? 0, jobUrl: url }, { lastScanVote: vote }),
     vote === "down"
       ? notifyOwner(
           `[Scene Fixer] 👎 on a scan (${job.errorCount ?? 0} errors)`,

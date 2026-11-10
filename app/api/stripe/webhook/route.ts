@@ -183,6 +183,7 @@ export async function POST(req: NextRequest) {
             ? { studioBuyer: true, studioPassUntil: new Date(Date.now() + passDays * 86_400_000).toISOString().slice(0, 10) }
             : { studioBuyer: true }
         );
+        if (passDays > 0) await loopsEvent(uid, "studio_pass_purchased", { passDays });
         await notifyOwner(
           `[Scene Fixer] Studio sale: $${((session.amount_total ?? 0) / 100).toFixed(2)}`,
           `Pack: ${session.metadata.pack}\nCredits: ${qty}\nPass days: ${passDays}\nUser: ${uid}\nEmail: ${session.customer_details?.email ?? "(none)"}`

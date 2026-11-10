@@ -278,6 +278,9 @@ def user_scan_finished(
         {"lastJobUrl": url, "lastScanErrors": error_count},
         email=email,
     )
+    if error_count and not single_shot:
+        # Its own event, so the Loops reminder needs no filter on properties.
+        event(job, "scan_found_errors", {"errorCount": error_count, "jobUrl": url}, email=email)
 
 
 def user_fix_finished(job_id: str, *, job: dict[str, Any] | None, attempted: int, verified: int, credits_refunded: int) -> None:
