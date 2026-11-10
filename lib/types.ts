@@ -21,6 +21,10 @@ export type Job = {
   watermark?: boolean;
   scoreBefore?: number;
   scoreAfter?: number;
+  /** One continuous shot: nothing to compare, and the scan was given back. */
+  singleShot?: boolean;
+  /** The uploader's 👍 / 👎 on the findings, set once by /api/jobs/[id]/feedback. */
+  scanVote?: "up" | "down";
   /**
    * Whether scoreAfter is comparable to scoreBefore.
    *

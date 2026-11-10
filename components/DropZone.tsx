@@ -380,7 +380,7 @@ export default function DropZone() {
         <div className="rounded-2xl border-2 border-dashed border-gray-200 bg-white p-8 text-center">
           <div className="text-5xl mb-3">🎬</div>
           <p className="text-black font-semibold text-lg mb-1">Drop your video here</p>
-          <p className="text-gray-500 text-sm mb-5">MP4 or MOV · 200MB max</p>
+          <p className="text-gray-500 text-sm mb-5">MP4 or MOV · 2+ shots · 200MB max</p>
           <button
             onClick={handleSignIn}
             disabled={signingIn}
@@ -451,7 +451,7 @@ export default function DropZone() {
         <p className="text-black font-semibold text-lg mb-1">
           Drop your video here
         </p>
-        <p className="text-gray-500 text-sm">MP4 or MOV · 200MB max</p>
+        <p className="text-gray-500 text-sm">MP4 or MOV · 2+ shots · 200MB max</p>
       </div>
 
       {creditsAdded && !error && (

@@ -6,6 +6,7 @@ import type Stripe from "stripe";
 import { captureServer } from "@/lib/posthog-server";
 import { notifyOwner } from "@/lib/notify";
 import { grantStudioPurchase } from "@/lib/studio/server";
+import { loopsEvent } from "@/lib/loopsEvents";
 
 export const config = { api: { bodyParser: false } };
 
@@ -173,6 +174,15 @@ export async function POST(req: NextRequest) {
             source: session.metadata.source ?? null,
           },
         });
+        // For the Studio receipt and pass-ending emails in Loops.
+        await loopsEvent(
+          uid,
+          "studio_purchased",
+          { pack: session.metadata.pack ?? "", credits: qty, passDays },
+          passDays > 0
+            ? { studioBuyer: true, studioPassUntil: new Date(Date.now() + passDays * 86_400_000).toISOString().slice(0, 10) }
+            : { studioBuyer: true }
+        );
         await notifyOwner(
           `[Scene Fixer] Studio sale: $${((session.amount_total ?? 0) / 100).toFixed(2)}`,
           `Pack: ${session.metadata.pack}\nCredits: ${qty}\nPass days: ${passDays}\nUser: ${uid}\nEmail: ${session.customer_details?.email ?? "(none)"}`
@@ -207,6 +217,7 @@ export async function POST(req: NextRequest) {
             source: session.metadata.source ?? null,
           },
         });
+        await loopsEvent(uid, "credits_purchased", { credits: qty }, { fixBuyer: true });
       }
       return NextResponse.json({ received: true });
     }
