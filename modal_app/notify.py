@@ -37,6 +37,7 @@ from typing import Any
 OWNER_EMAIL = "business@alanany.com"
 
 _LOOPS_URL = "https://app.loops.so/api/v1/transactional"
+_LOOPS_EVENT_URL = "https://app.loops.so/api/v1/events/send"
 
 
 def _send(subject: str, text: str) -> None:
@@ -199,6 +200,10 @@ def fix_finished(
             "happening, the fix stage — not detection — is what to look at.",
         ]
     _send(subject, "\n".join(body))
+    try:
+        user_fix_finished(job_id, job=job, attempted=attempted, verified=verified, credits_refunded=credits_refunded)
+    except Exception as exc:
+        print(f"user_fix_finished failed: {exc}")
 
 
 # ── Emails to the person who uploaded ────────────────────────────────────────
@@ -223,16 +228,37 @@ def _uploader_email(job: dict[str, Any] | None) -> str | None:
         return None
 
 
-def user_scan_finished(job_id: str, *, job: dict[str, Any] | None, error_count: int, shot_count: int) -> None:
-    """Tell the uploader their scan is ready."""
+def user_scan_finished(
+    job_id: str,
+    *,
+    job: dict[str, Any] | None,
+    error_count: int,
+    shot_count: int,
+    single_shot: bool = False,
+) -> None:
+    """Tell the uploader their scan is ready, and tell Loops it happened."""
     url = f"https://scenefixer.com/job/{job_id}"
-    if error_count:
+    if single_shot:
+        subject = "Your video is one shot, so there was nothing to compare"
+        lines = [
+            "Scene Fixer checks that things match between shots: wardrobe, props, lighting, "
+            "the room. Your video is one continuous shot, so there was no second shot to "
+            "compare it with.",
+            "",
+            "This scan didn't count toward your daily free scan. Upload the full sequence "
+            "(two or more shots cut together) and we'll check every cut.",
+            "",
+            f"Your result: {url}",
+        ]
+    elif error_count:
         subject = f"Your scan is ready — {error_count} continuity error{'s' if error_count != 1 else ''} found"
         lines = [
             f"We checked {shot_count} shot{'s' if shot_count != 1 else ''} in your video and found "
             f"{error_count} thing{'s' if error_count != 1 else ''} that don't match between shots.",
             "",
             f"See them here: {url}",
+            "",
+            "Your first fix is free: pick an error and press Fix.",
         ]
     else:
         subject = "Your scan is ready"
@@ -242,7 +268,75 @@ def user_scan_finished(job_id: str, *, job: dict[str, Any] | None, error_count: 
             "",
             f"See the result: {url}",
         ]
-    _send_to(_uploader_email(job), os.environ.get("LOOPS_USER_TRANSACTIONAL_ID"), subject, "\n".join(lines))
+    email = _uploader_email(job)
+    _send_to(email, os.environ.get("LOOPS_USER_TRANSACTIONAL_ID"), subject, "\n".join(lines))
+    event(
+        job,
+        "scan_finished",
+        {"errorCount": error_count, "shotCount": shot_count, "singleShot": single_shot, "jobUrl": url},
+        {"lastJobUrl": url, "lastScanErrors": error_count},
+        email=email,
+    )
+
+
+def user_fix_finished(job_id: str, *, job: dict[str, Any] | None, attempted: int, verified: int, credits_refunded: int) -> None:
+    """Tell the uploader how their fix run went, and tell Loops it happened."""
+    url = f"https://scenefixer.com/job/{job_id}"
+    if verified:
+        subject = f"Your fixed clip is ready ({verified} of {attempted} fixed)"
+        lines = [f"{verified} of the {attempted} error{'s' if attempted != 1 else ''} you picked {'is' if verified == 1 else 'are'} fixed.", "", f"Watch and download it: {url}"]
+        if credits_refunded:
+            lines += ["", f"The rest didn't work, so {credits_refunded} credit{'s' if credits_refunded != 1 else ''} went back to your account."]
+    else:
+        subject = "Your fix didn't work, so your credits are back"
+        lines = [
+            "We tried, but the error was still visible afterwards, so we didn't keep the result.",
+            f"{credits_refunded} credit{'s' if credits_refunded != 1 else ''} went back to your account automatically." if credits_refunded else "Nothing was charged.",
+            "",
+            f"Your scan: {url}",
+        ]
+    email = _uploader_email(job)
+    _send_to(email, os.environ.get("LOOPS_USER_TRANSACTIONAL_ID"), subject, "\n".join(lines))
+    contact = {"hasFixed": True} if verified else {}
+    event(job, "fix_finished", {"attempted": attempted, "verified": verified, "jobUrl": url}, contact, email=email)
+
+
+def event(
+    job: dict[str, Any] | None,
+    name: str,
+    props: dict[str, Any] | None = None,
+    contact: dict[str, Any] | None = None,
+    *,
+    email: str | None = None,
+) -> None:
+    """
+    Tell Loops something happened to this job's owner, for the lifecycle emails
+    built as Loops automations (welcome, unfixed-errors reminder, feedback
+    replies). Sends nothing by itself: an event only emails someone once a
+    published Loop listens for it. Swallows everything.
+    """
+    api_key = os.environ.get("LOOPS_API_KEY")
+    uid = (job or {}).get("ownerUid")
+    email = email or _uploader_email(job)
+    if not api_key or not email:
+        return
+    try:
+        import requests
+
+        body: dict[str, Any] = {"email": email, "eventName": name, "eventProperties": props or {}}
+        if uid:
+            body["userId"] = uid
+        body.update(contact or {})
+        resp = requests.post(
+            _LOOPS_EVENT_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=body,
+            timeout=10,
+        )
+        if resp.status_code >= 300:
+            print(f"notify: loops event {name} returned {resp.status_code}: {resp.text[:200]}")
+    except Exception as exc:
+        print(f"notify: loops event {name} failed ({type(exc).__name__}: {exc})")
 
 
 def user_scan_failed(job_id: str, *, job: dict[str, Any] | None, message: str) -> None:

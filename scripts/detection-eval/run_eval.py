@@ -10,8 +10,8 @@ Positives are synthetic grade mismatches; they measure that we did not fix the
 false-positive rate by simply going blind.
 """
 import argparse, base64, json, os, sys, collections, concurrent.futures
-sys.path.insert(0, "/Users/alanany/Desktop/Scene Fixer")
-for line in open("/Users/alanany/Desktop/Scene Fixer/.env.local"):
+sys.path.insert(0, "/Users/alanany/Desktop/Scene Fixer v221026")
+for line in open("/Users/alanany/Desktop/Scene Fixer v221026/.env.local"):
     if "=" in line and not line.strip().startswith("#"):
         k, v = line.split("=", 1)
         os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from variants import build_v1, build_v2, build_v4, build_v5
 
 PRICES = {"claude-opus-5": (5.0, 25.0), "claude-opus-4-8": (5.0, 25.0),
-          "claude-sonnet-5": (2.0, 10.0), "claude-haiku-4-5": (1.0, 5.0)}
+          "claude-sonnet-5": (2.0, 10.0), "claude-haiku-4-5": (1.0, 5.0), "claude-haiku-5-5": (0.10, 0.50)}
 
 def b64(p):
     return base64.standard_b64encode(open(p, "rb").read()).decode()
@@ -53,12 +53,11 @@ def call(client, case, args, prompt_fn):
     r = client.messages.create(**kw)
     txt = next((b.text for b in r.content if getattr(b, "type", "") == "text"), "")
     raw = txt.strip()
-    if raw.startswith("```"):
-        raw = "\n".join(raw.split("\n")[1:-1]).strip()
     try:
-        parsed = json.loads(raw)
+        from modal_app.detect import _parse_json  # the parser production uses
+        parsed = _parse_json(raw)
     except Exception:
-        return None, r.usage, raw[:200]
+        return None, r.usage, f"[{r.stop_reason}, out={r.usage.output_tokens}] " + raw[:200]
     errs = parsed.get("errors", parsed) if isinstance(parsed, dict) else parsed
     return (errs if isinstance(errs, list) else []), r.usage, None
 
@@ -101,7 +100,9 @@ def main():
             tcreate += getattr(usage, "cache_creation_input_tokens", 0) or 0
             tread += getattr(usage, "cache_read_input_tokens", 0) or 0
         if errs is None:
-            fails += 1; continue
+            fails += 1
+            if os.environ.get("EVAL_SHOW_FAILS"): print(f"  FAIL {c['id']}: stop={getattr(usage,'_stop','?')} {err!r}")
+            continue
         per[c["id"]].append(errs)
     neg = [c for c in cases if c["expected_errors"] == 0]
     pos = [c for c in cases if c["expected_errors"] > 0]

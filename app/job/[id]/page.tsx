@@ -530,7 +530,7 @@ export default function JobPage({ params }: Props) {
             full refund. */}
         {(job.scoreBefore !== undefined || showScoreAfter) && (
           <div className="flex gap-4 mt-4">
-            {job.scoreBefore !== undefined && (
+            {job.scoreBefore !== undefined && !job.singleShot && (
               <ScoreBadge score={job.scoreBefore} label="before" />
             )}
             {showScoreAfter && (
@@ -646,18 +646,43 @@ export default function JobPage({ params }: Props) {
 
       {/* One-tap feedback. The "Beta — Tell us →" form before it was opened
           twice in the week to 9 Nov and sent zero times. */}
-      {job.status === "awaiting_confirmation" && job.scoreBefore !== undefined && (
+      {job.singleShot && job.status === "awaiting_confirmation" && (
+        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-4">
+          <p className="text-sm font-semibold text-black mb-1">This video is one continuous shot</p>
+          <p className="text-xs text-gray-700 mb-3">
+            Scene Fixer checks that wardrobe, props, lighting and the set match <i>between</i> shots. With
+            only one shot there was nothing to compare, so this scan didn&apos;t count toward your daily
+            free scan. Upload the full sequence, with two or more shots cut together.
+          </p>
+          <Link href="/" className="inline-block text-xs font-semibold text-black underline underline-offset-2 hover:opacity-70">
+            Upload a sequence →
+          </Link>
+        </div>
+      )}
+
+      {job.status === "awaiting_confirmation" && job.scoreBefore !== undefined && !job.singleShot && (
         <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
           <p className="text-xs text-gray-700">
-            {scanVote ? "Thanks — that helps." : "Were these findings right?"}
+            {scanVote || job.scanVote ? "Thanks — that helps." : "Were these findings right?"}
           </p>
-          {!scanVote ? (
+          {!scanVote && !job.scanVote ? (
             <div className="flex gap-2">
               {(["up", "down"] as const).map((v) => (
                 <button
                   key={v}
                   onClick={() => {
                     setScanVote(v);
+                    // Stored on the job, a 👎 emails the owner, and Loops gets it.
+                    auth.currentUser
+                      ?.getIdToken()
+                      .then((token) =>
+                        fetch(`/api/jobs/${jobId}/feedback`, {
+                          method: "POST",
+                          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                          body: JSON.stringify({ vote: v }),
+                        })
+                      )
+                      .catch(() => undefined);
                     posthog.capture("scan_feedback", {
                       job_id: jobId,
                       vote: v,

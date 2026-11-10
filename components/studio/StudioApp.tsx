@@ -81,6 +81,14 @@ function perVideo(price: number, videos: number) {
   return cents >= 100 ? `$${(cents / 100).toFixed(2)}` : `${cents}¢`;
 }
 
+/** The best per-video price across the credit packs, launch bonus included. */
+function lowestPerVideo() {
+  const best = STUDIO_PACKS.filter((p) => !p.passDays)
+    .map((p) => ({ p, v: videosFor(packCredits(p).total) }))
+    .sort((a, b) => a.p.price / a.v - b.p.price / b.v)[0];
+  return perVideo(best.p.price, best.v);
+}
+
 function videosFor(credits: number) {
   return Math.floor(credits / CREDITS_PER_VIDEO);
 }
@@ -177,27 +185,32 @@ export default function StudioApp() {
   return (
     <main className="min-h-screen bg-white px-4 pb-24 pt-12 text-[#0a0a0a]">
       <div className="mx-auto max-w-5xl">
-        <section className="text-center">
+        {launchBonusActive() && <PromoStrip />}
+
+        <section className="mt-8 text-center">
           <div className="inline-flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">
+            {batch?.open && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />}
             {batch === null
               ? "Limited batch"
               : batch.open
                 ? `Limited batch · about ${fmt(batch.videosLeft)} videos left`
                 : "This batch is sold out"}
           </div>
-          <h1 className="mt-4 text-3xl font-semibold tracking-tight sm:text-5xl">
-            Seedance 2.5 videos {launchBonusActive() ? "for under $1 each" : "for about $1 each"}
+          <h1 className="mt-4 text-4xl font-extrabold uppercase leading-[1.05] tracking-tight sm:text-6xl">
+            Seedance 2.5
+            <span className="block text-gray-400">from {lowestPerVideo()} a video</span>
           </h1>
           <p className="mx-auto mt-4 max-w-2xl text-base text-gray-600 sm:text-lg">
-            Make videos with ByteDance&apos;s newest model, with sound, at 720p or 1080p. Pay once: there&apos;s no
-            subscription, and your credits never expire. Every video is saved to your account.
+            ByteDance&apos;s newest video model, with sound, at 720p or 1080p. <b className="text-black">Pay once.</b> No
+            subscription, credits never expire, and every video is saved to your account.
           </p>
-          {launchBonusActive() && (
-            <p className="mx-auto mt-5 inline-block rounded-xl bg-black px-4 py-2 text-sm font-medium text-white">
-              Launch week: +{LAUNCH_BONUS.pct}% bonus credits on every pack until{" "}
-              {new Date(LAUNCH_BONUS.until).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" })}
-            </p>
-          )}
+          <div className="mx-auto mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-sm">
+            <span className="text-gray-500">Higgsfield</span>
+            <s className="text-xl font-bold text-gray-400 decoration-red-500 decoration-2">$59/mo</s>
+            <span className="text-gray-300">&rarr;</span>
+            <span className="text-gray-500">here from</span>
+            <span className="rounded-lg bg-[#d7ff3a] px-2.5 py-1 text-xl font-extrabold text-black">$9 once</span>
+          </div>
         </section>
 
         {notice && (
@@ -244,60 +257,109 @@ export default function StudioApp() {
   );
 }
 
+function PromoStrip() {
+  const left = useCountdown(LAUNCH_BONUS.until);
+  const ends = new Date(LAUNCH_BONUS.until).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+  return (
+    <div className="rounded-2xl bg-black px-4 py-4 text-center text-white sm:px-6">
+      <p className="text-lg font-extrabold uppercase tracking-tight text-[#d7ff3a] sm:text-2xl">
+        Launch week: +{LAUNCH_BONUS.pct}% free credits on every pack
+      </p>
+      <p className="mt-1 text-sm text-gray-300">
+        Ends {ends}
+        {left && (
+          <>
+            {" · "}
+            <span className="font-mono font-semibold text-white">{left}</span> left
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
+/** "2d 14h 05m" until `until`; null before mount, so server and browser render the same. */
+function useCountdown(until: number) {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  if (now === null || now > until) return null;
+  const m = Math.floor((until - now) / 60_000);
+  const d = Math.floor(m / 1440);
+  const h = Math.floor((m % 1440) / 60);
+  return `${d}d ${h}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
 function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string | null; onBuy: (p: StudioPack) => void }) {
   const soldOut = batch !== null && !batch.open;
   return (
     <section id="packs" className="mt-10">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-5 pt-3 sm:grid-cols-2 lg:grid-cols-4">
         {STUDIO_PACKS.map((p) => {
           const c = packCredits(p);
           const videos = videosFor(c.total);
           const pass = !!p.passDays;
+          const hot = p.note === "most popular";
           return (
             <div
               key={p.id}
-              className={`flex flex-col rounded-2xl border p-5 ${p.note === "most popular" ? "border-black ring-1 ring-black" : "border-gray-200"} ${pass ? "bg-gray-50" : ""}`}
+              className={`relative flex flex-col rounded-2xl border p-5 ${hot ? "border-black ring-2 ring-black" : "border-gray-200"} ${pass ? "bg-gray-50" : "bg-white"}`}
             >
-              <div className="flex items-baseline justify-between">
+              {c.bonus > 0 && (
+                <span className="absolute -right-2 -top-3 rotate-6 rounded-lg bg-[#d7ff3a] px-2 py-1 text-xs font-extrabold uppercase text-black shadow-sm">
+                  +{LAUNCH_BONUS.pct}% free
+                </span>
+              )}
+              <div className="flex items-center gap-2">
                 <span className="font-semibold">{p.title}</span>
-                {p.note && <span className="rounded-full bg-black px-2 py-0.5 text-[11px] font-medium text-white">{p.note}</span>}
-              </div>
-              <div className="mt-3 text-3xl font-semibold">${p.price}</div>
-              <div className="text-sm text-gray-500">{pass ? `for ${p.passDays} days` : "one-time"}</div>
-              <ul className="mt-4 flex-1 space-y-1.5 text-sm text-gray-700">
-                {pass ? (
-                  <>
-                    <li>
-                      <b>Unlimited Fast videos*</b>
-                    </li>
-                    <li>
-                      + {fmt(c.total)} credits = <b>{videos} Seedance 2.5 videos</b>
-                    </li>
-                    {c.bonus > 0 && <li className="text-emerald-700">incl. {fmt(c.bonus)} launch bonus credits</li>}
-                  </>
-                ) : (
-                  <>
-                    <li>
-                      {fmt(c.total)} credits = <b>{videos} Seedance 2.5 videos</b>
-                    </li>
-                    {c.bonus > 0 && (
-                      <li className="text-emerald-700">
-                        <s className="text-gray-400">{fmt(c.base)}</s> +{fmt(c.bonus)} launch bonus
-                      </li>
-                    )}
-                    <li className="text-gray-500">{perVideo(p.price, videos)} a video</li>
-                  </>
+                {p.note && (
+                  <span className="rounded-full bg-black px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                    {p.note}
+                  </span>
                 )}
-                <li className="text-gray-500">5-second, 720p, with sound</li>
+              </div>
+              <div className="mt-3 flex items-baseline gap-1.5">
+                <span className="text-4xl font-extrabold tracking-tight">${p.price}</span>
+                <span className="text-sm text-gray-500">{pass ? `/ ${p.passDays} days` : "once"}</span>
+              </div>
+
+              <div className="mt-4 rounded-xl bg-gray-100 px-3 py-2.5">
+                <div className="text-2xl font-extrabold leading-none">
+                  {videos} <span className="text-base font-semibold">Seedance videos</span>
+                </div>
+                {pass ? (
+                  <div className="mt-1.5 text-sm font-semibold">+ unlimited Fast videos*</div>
+                ) : (
+                  <div className="mt-1.5 inline-block rounded-md bg-black px-1.5 py-0.5 text-xs font-bold text-[#d7ff3a]">
+                    {perVideo(p.price, videos)} a video
+                  </div>
+                )}
+              </div>
+
+              <ul className="mt-3 flex-1 space-y-1 text-sm text-gray-600">
+                <li>
+                  {c.bonus > 0 ? (
+                    <>
+                      <s className="text-gray-400">{fmt(c.base)}</s> <b className="text-black">{fmt(c.total)} credits</b>
+                    </>
+                  ) : (
+                    <>{fmt(c.total)} credits</>
+                  )}
+                </li>
+                <li>5 s, 720p, with sound</li>
+                <li>Credits never expire</li>
               </ul>
               <button
                 disabled={soldOut || buying !== null}
                 onClick={() => onBuy(p)}
-                className={`mt-5 rounded-lg py-2.5 font-medium disabled:cursor-not-allowed disabled:opacity-40 ${
-                  p.note === "most popular" ? "bg-black text-white" : "border border-gray-300 hover:border-black"
+                className={`mt-5 rounded-xl py-3 font-bold transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
+                  hot ? "bg-black text-white hover:bg-gray-800" : "border-2 border-black hover:bg-black hover:text-white"
                 }`}
               >
-                {buying === p.id ? "Opening checkout…" : soldOut ? "Sold out" : `Buy for $${p.price}`}
+                {buying === p.id ? "Opening checkout…" : soldOut ? "Sold out" : `Get ${videos} videos for $${p.price}`}
               </button>
             </div>
           );
@@ -305,36 +367,40 @@ function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string |
       </div>
       <p className="mt-4 text-center text-xs text-gray-500">
         *Unlimited covers Fast videos (Grok Imagine Lite), up to {PASS_FAST_PER_DAY} a day for {STUDIO_PACKS.find((p) => p.passDays)?.passDays} days
-        as fair use. Seedance 2.5 videos always use credits. Credits from every pack never expire.
+        as fair use. Seedance 2.5 videos always use credits. Failed videos are refunded automatically.
       </p>
     </section>
   );
 }
 
-/** Checked on higgsfield.ai/pricing, 9 Nov 2026. Update or remove if their plans change. */
+/** Checked on higgsfield.ai/pricing, 10 Nov 2026. Update or remove if their plans change. */
 function Compare() {
+  const rows: [string, string, string][] = [
+    ["Cheapest way to get Seedance 2.5", "$59 a month", "$9, once"],
+    ["A year of it", "$708 ($564 billed yearly)", "Only what you buy"],
+    ["Unused credits", "Plan credits renew monthly", "Never expire"],
+    ["Commitment", "Monthly subscription", "None"],
+  ];
   return (
-    <section className="mx-auto mt-12 max-w-3xl rounded-2xl border border-gray-200 p-5 sm:p-6">
-      <h2 className="text-lg font-semibold">How this compares</h2>
-      <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
-        <div className="rounded-xl bg-gray-50 p-4">
-          <div className="font-medium">Higgsfield</div>
-          <ul className="mt-2 space-y-1.5 text-gray-600">
-            <li>Starter ($19/month) doesn&apos;t include Seedance at all</li>
-            <li>Seedance 2.5 needs Plus: <b>$59/month</b> ($47/month billed yearly)</li>
-            <li>A monthly subscription</li>
-          </ul>
+    <section className="mx-auto mt-14 max-w-3xl">
+      <h2 className="text-center text-2xl font-extrabold uppercase tracking-tight">Why pay monthly?</h2>
+      <div className="mt-5 overflow-hidden rounded-2xl border border-gray-200 text-sm">
+        <div className="grid grid-cols-[1.1fr_1fr_1fr] gap-2 bg-gray-50 px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+          <span />
+          <span>Higgsfield Plus</span>
+          <span className="text-black">Scene Fixer Studio</span>
         </div>
-        <div className="rounded-xl border border-black p-4">
-          <div className="font-medium">Scene Fixer Studio</div>
-          <ul className="mt-2 space-y-1.5 text-gray-700">
-            <li>Seedance 2.5 from <b>$9</b></li>
-            <li>No subscription; pay once</li>
-            <li>Credits never expire; failed videos are refunded</li>
-          </ul>
-        </div>
+        {rows.map(([k, them, us]) => (
+          <div key={k} className="grid grid-cols-[1.1fr_1fr_1fr] gap-2 border-t border-gray-100 px-4 py-3">
+            <span className="text-gray-500">{k}</span>
+            <span className="text-gray-400">{them}</span>
+            <span className="font-bold">{us}</span>
+          </div>
+        ))}
       </div>
-      <p className="mt-3 text-xs text-gray-400">Higgsfield prices from higgsfield.ai/pricing on 9 Nov 2026.</p>
+      <p className="mt-3 text-center text-xs text-gray-400">
+        Higgsfield Plus includes 80 Seedance 2.5 videos a month plus other models. Prices from higgsfield.ai/pricing on 10 Nov 2026.
+      </p>
     </section>
   );
 }

@@ -371,6 +371,64 @@ def _first_text(response) -> str:
     return ""
 
 
+
+def _return_single_shot_scan(job_id: str, owner_uid: str | None) -> None:
+    """
+    Give back the scan a one-shot video used: today's free scan count, or the
+    credit a paid extra scan cost. Once per job (scanReturned), so a retried
+    analysis can't hand it back twice. Best-effort.
+    """
+    if not owner_uid:
+        return
+    try:
+        from google.cloud import firestore
+        from google.cloud.firestore_v1 import Increment
+        from modal_app.firebase import get_db
+
+        db = get_db()
+        job_ref = db.collection("jobs").document(job_id)
+        user_ref = db.collection("users").document(owner_uid)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        @firestore.transactional
+        def _tx(tx) -> None:
+            job = job_ref.get(transaction=tx).to_dict() or {}
+            if job.get("scanReturned"):
+                return
+            user = user_ref.get(transaction=tx).to_dict() or {}
+            tx.update(job_ref, {"scanReturned": True, "extraScanCharged": False})
+            if job.get("extraScanCharged"):
+                tx.update(user_ref, {"creditsBalance": Increment(int(job.get("extraScanCredits") or 1))})
+            elif user.get("scanDate") == today and int(user.get("scansToday") or 0) > 0:
+                tx.update(user_ref, {"scansToday": Increment(-1)})
+
+        _tx(db.transaction())
+    except Exception as exc:
+        print(f"single-shot scan return failed for {job_id}: {exc}")
+
+def _parse_json(raw: str):
+    """
+    The JSON object in a model reply, or raise ValueError.
+
+    Haiku 5.5 (every free scan) often closes its answer with a stray ```
+    fence or adds a sentence after the JSON. json.loads rejects both, and a
+    rejected pair was dropped as if it had been checked: measured 10 Nov on
+    scripts/detection-eval, 10 of 27 Haiku replies were thrown away like that,
+    every one of them a valid answer. Decode the first object and ignore the
+    rest.
+    """
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    start = text.find("{")
+    if start < 0:
+        raise ValueError(f"no JSON object in reply: {raw[:200]!r}")
+    obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    if not isinstance(obj, dict):
+        raise ValueError("reply JSON is not an object")
+    return obj
+
+
 _EXEMPLAR_CACHE: dict = {}
 
 
@@ -679,14 +737,7 @@ def compare_pair(
     )
     tier.meter.record(tier.pair_model, response.usage)
 
-    raw = _first_text(response).strip()
-    # Strip markdown code fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
-    parsed = json.loads(raw)
+    parsed = _parse_json(_first_text(response))
 
     errors = parsed.get("errors", [])
 
@@ -763,13 +814,9 @@ def detect_standalone(
     )
     tier.meter.record(tier.single_model, response.usage)
 
-    raw = _first_text(response).strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    raw = _first_text(response)
     try:
-        parsed = json.loads(raw)
+        parsed = _parse_json(raw)
     except Exception:
         print(f"detect_standalone: could not parse {raw[:200]!r}")
         parsed = {"errors": []}
@@ -943,13 +990,9 @@ def detect_holistic(
             messages=[{"role": "user", "content": content}],
         )
         tier.meter.record(tier.single_model, response.usage)
-        raw = _first_text(response).strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+        raw = _first_text(response)
         try:
-            parsed = json.loads(raw)
+            parsed = _parse_json(raw)
         except Exception:
             print(f"detect_holistic: could not parse {raw[:200]!r}")
             parsed = {"outliers": []}
@@ -1259,8 +1302,18 @@ def run_detect(job_id: str) -> int:
         )
     print(f"Detection: Claude spend ${tier.meter.spent_usd:.4f} over {tier.meter.calls} call(s)")
 
+    # One continuous shot has no cut to check, so it found nothing because there
+    # was nothing to compare, not because the video is clean. 8 of the 36 scans
+    # in the three weeks to 10 Nov were like that, and each used up the
+    # uploader's only free scan of the day (the 10 Nov user then hit the limit
+    # twice in a row). Say so, and give the scan back.
+    single_shot = len(shots) == 1
+    if single_shot:
+        _return_single_shot_scan(job_id, job_doc.get("ownerUid"))
+
     job_ref.update({
         "status": "awaiting_confirmation",
+        "singleShot": single_shot,
         "errorCount": total_errors,
         "scoreBefore": score,
         # verify reads scanTier to compare like with like (tier_for_verify).
@@ -1289,6 +1342,7 @@ def run_detect(job_id: str) -> int:
             "pair_count": len(get_pairs_to_compare(shots)) if len(shots) >= 2 else 0,
             "raw_before_dedupe": len(raw),
             "had_zero_shots": False,
+            "single_shot": single_shot,
             "scan_tier": tier.label,
             "scan_model": tier.pair_model,
             "claude_cost_usd": round(tier.meter.spent_usd, 4),
@@ -1314,7 +1368,9 @@ def run_detect(job_id: str) -> int:
             analysed_s=fresh.get("analysedSeconds"),
             total_s=fresh.get("totalSeconds"),
         )
-        notify.user_scan_finished(job_id, job=fresh, error_count=total_errors, shot_count=len(shots))
+        notify.user_scan_finished(
+            job_id, job=fresh, error_count=total_errors, shot_count=len(shots), single_shot=single_shot
+        )
     except Exception as exc:
         print(f"analysis_finished notify failed: {exc}")
 
