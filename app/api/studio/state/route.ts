@@ -15,7 +15,7 @@ export const maxDuration = 120;
 /** How much of the batch is left, plus (when signed in) the buyer's balance and videos. */
 export async function GET(req: NextRequest) {
   const b = await batchState();
-  const batch = { open: b.open, videosLeft: b.videosLeft };
+  const batch = { open: b.open, videosLeft: b.videosLeft, passesLeft: b.passesLeft };
   if (!req.headers.get("Authorization")) return NextResponse.json({ batch });
   try {
     const { uid } = await requireUid(req);

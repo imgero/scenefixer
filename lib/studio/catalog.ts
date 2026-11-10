@@ -132,8 +132,24 @@ export function packCredits(p: StudioPack, now = Date.now()): { base: number; bo
   return { base: p.credits, bonus, total: p.credits + bonus };
 }
 
-/** Fair-use limit on Fast videos for pass holders, per UTC day. */
-export const PASS_FAST_PER_DAY = 20;
+/**
+ * What the Unlimited* pass covers, and how many can be sold.
+ *
+ * Worked out on 10 Nov: at 20 a day of any Fast video (up to 10 s at 720p,
+ * 30 Runway credits each) one pass could burn ~21,600 Runway credits, about
+ * $216 at Runway's list price, for $29. Covering only 5-second 480p Fast
+ * videos (10 Runway credits), 10 a day, caps a pass at 3,000 Runway credits
+ * of Fast plus its Seedance credits, and PASS_LIMIT caps how many exist.
+ */
+export const PASS_FAST_PER_DAY = 10;
+export const PASS_FAST_RESOLUTION: Resolution = "480p";
+export const PASS_FAST_SECONDS = 5;
+export const PASS_LIMIT = 10;
+
+/** Whether a video is free with an active pass. */
+export function passCovers(m: StudioModel, res: Resolution, seconds: number): boolean {
+  return m.inPass && res === PASS_FAST_RESOLUTION && seconds === PASS_FAST_SECONDS;
+}
 
 export function studioPack(id: string): StudioPack | undefined {
   return STUDIO_PACKS.find((p) => p.id === id);

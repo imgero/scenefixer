@@ -9,6 +9,9 @@ import {
   CREDITS_PER_VIDEO,
   LAUNCH_BONUS,
   PASS_FAST_PER_DAY,
+  PASS_FAST_RESOLUTION,
+  PASS_FAST_SECONDS,
+  passCovers,
   launchBonusActive,
   packCredits,
   STUDIO_MAX_PROMPT,
@@ -22,7 +25,7 @@ import {
   type StudioPack,
 } from "@/lib/studio/catalog";
 
-type Batch = { open: boolean; videosLeft: number };
+type Batch = { open: boolean; videosLeft: number; passesLeft?: number };
 type Account = { credits: number; passUntil: number | null; fastLeftToday: number | null };
 type Job = {
   id: string;
@@ -79,6 +82,19 @@ async function toDataUri(file: File): Promise<string> {
 function perVideo(price: number, videos: number) {
   const cents = Math.round((price / videos) * 100);
   return cents >= 100 ? `$${(cents / 100).toFixed(2)}` : `${cents}¢`;
+}
+
+/** Higgsfield's monthly prices, from higgsfield.ai/pricing on 10 Nov 2026. Plus is their cheapest plan with Seedance 2.5. */
+const HIGGSFIELD_PLUS = 59;
+const HIGGSFIELD_STARTER = 19;
+
+function cheapestPack() {
+  return Math.min(...STUDIO_PACKS.map((p) => p.price));
+}
+
+/** How much less our cheapest way into Seedance 2.5 costs than theirs, rounded down. */
+function savingsPct() {
+  return Math.floor((1 - cheapestPack() / HIGGSFIELD_PLUS) * 100);
 }
 
 /** The best per-video price across the credit packs, launch bonus included. */
@@ -204,12 +220,15 @@ export default function StudioApp() {
             ByteDance&apos;s newest video model, with sound, at 720p or 1080p. <b className="text-black">Pay once.</b> No
             subscription, credits never expire, and every video is saved to your account.
           </p>
-          <div className="mx-auto mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-sm">
-            <span className="text-gray-500">Higgsfield</span>
-            <s className="text-xl font-bold text-gray-400 decoration-red-500 decoration-2">$59/mo</s>
-            <span className="text-gray-300">&rarr;</span>
-            <span className="text-gray-500">here from</span>
-            <span className="rounded-lg bg-[#d7ff3a] px-2.5 py-1 text-xl font-extrabold text-black">$9 once</span>
+          <div className="mx-auto mt-8 max-w-xl rounded-2xl border-2 border-black bg-[#d7ff3a] px-5 py-5">
+            <div className="text-5xl font-black uppercase leading-none tracking-tight sm:text-7xl">{savingsPct()}% less</div>
+            <div className="mt-2 text-sm font-semibold sm:text-base">
+              than Higgsfield to start making Seedance 2.5 videos:{" "}
+              <span className="whitespace-nowrap">
+                <b>${cheapestPack()} once</b> vs <s className="decoration-red-600 decoration-2">${HIGGSFIELD_PLUS}/month</s>
+              </span>
+            </div>
+            <div className="mt-1 text-xs text-black/70">Their ${HIGGSFIELD_STARTER} Starter plan doesn&apos;t include Seedance 2.5.</div>
           </div>
         </section>
 
@@ -294,7 +313,7 @@ function useCountdown(until: number) {
 }
 
 function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string | null; onBuy: (p: StudioPack) => void }) {
-  const soldOut = batch !== null && !batch.open;
+  const batchGone = batch !== null && !batch.open;
   return (
     <section id="packs" className="mt-10">
       <div className="grid gap-5 pt-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -303,6 +322,7 @@ function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string |
           const videos = videosFor(c.total);
           const pass = !!p.passDays;
           const hot = p.note === "most popular";
+          const soldOut = batchGone || (pass && batch?.passesLeft !== undefined && batch.passesLeft <= 0);
           return (
             <div
               key={p.id}
@@ -331,7 +351,14 @@ function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string |
                   {videos} <span className="text-base font-semibold">Seedance videos</span>
                 </div>
                 {pass ? (
-                  <div className="mt-1.5 text-sm font-semibold">+ unlimited Fast videos*</div>
+                  <>
+                    <div className="mt-1.5 text-sm font-semibold">+ unlimited Fast videos*</div>
+                    {batch?.passesLeft !== undefined && batch.passesLeft > 0 && (
+                      <div className="mt-1.5 inline-block rounded-md bg-red-600 px-1.5 py-0.5 text-xs font-bold text-white">
+                        Only {batch.passesLeft} left
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="mt-1.5 inline-block rounded-md bg-black px-1.5 py-0.5 text-xs font-bold text-[#d7ff3a]">
                     {perVideo(p.price, videos)} a video
@@ -366,8 +393,9 @@ function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string |
         })}
       </div>
       <p className="mt-4 text-center text-xs text-gray-500">
-        *Unlimited covers Fast videos (Grok Imagine Lite), up to {PASS_FAST_PER_DAY} a day for {STUDIO_PACKS.find((p) => p.passDays)?.passDays} days
-        as fair use. Seedance 2.5 videos always use credits. Failed videos are refunded automatically.
+        *Unlimited covers {PASS_FAST_SECONDS}-second {PASS_FAST_RESOLUTION} Fast videos (Grok Imagine Lite), up to {PASS_FAST_PER_DAY} a day for{" "}
+        {STUDIO_PACKS.find((p) => p.passDays)?.passDays} days, as fair use. Seedance 2.5 videos always use credits. Launch pricing for
+        this first batch: pack contents and prices may change for later batches. Failed videos are refunded automatically.
       </p>
     </section>
   );
@@ -377,6 +405,7 @@ function Packs({ batch, buying, onBuy }: { batch: Batch | null; buying: string |
 function Compare() {
   const rows: [string, string, string][] = [
     ["Cheapest way to get Seedance 2.5", "$59 a month", "$9, once"],
+    ["$19 entry plan", "No Seedance 2.5", "Seedance 2.5 from $9"],
     ["A year of it", "$708 ($564 billed yearly)", "Only what you buy"],
     ["Unused credits", "Plan credits renew monthly", "Never expire"],
     ["Commitment", "Monthly subscription", "None"],
@@ -470,7 +499,7 @@ function Generator({
 
   const m = studioModel(modelId)!;
   const cost = studioCost(m, resolution, seconds, !!image);
-  const free = m.inPass && !!account.passUntil && (account.fastLeftToday ?? 0) > 0;
+  const free = passCovers(m, resolution, seconds) && !!account.passUntil && (account.fastLeftToday ?? 0) > 0;
   const short = !free && cost > account.credits;
 
   const pick = (id: string) => {
@@ -681,7 +710,7 @@ function Faq() {
     ["Where are my videos kept?", "In your account. Every finished video is saved here, so you can come back and download it any time."],
     ["What happens if a video fails?", "You get the credits back automatically, including when the content filter blocks a prompt or image."],
     ["Can I animate a photo?", "Yes, add a start image. Seedance won't animate photos of real people; if the filter refuses an image, your credits come back."],
-    ["What does Unlimited* mean?", `The pass gives you Fast videos (a quicker, lower-quality model, good for testing ideas) without spending credits, up to ${PASS_FAST_PER_DAY} a day for 30 days, plus ${packCredits(STUDIO_PACKS.find((p) => p.passDays)!).total} credits for Seedance 2.5.`],
+    ["What does Unlimited* mean?", `The pass gives you ${PASS_FAST_SECONDS}-second ${PASS_FAST_RESOLUTION} Fast videos (a quicker, lower-quality model, good for testing ideas) without spending credits, up to ${PASS_FAST_PER_DAY} a day for 30 days, plus ${packCredits(STUDIO_PACKS.find((p) => p.passDays)!).total} credits for Seedance 2.5.`],
     ["Why is it this cheap?", "We bought a large block of video-generation capacity for Scene Fixer and are selling part of it. When this batch is gone, it's gone."],
   ];
   return (

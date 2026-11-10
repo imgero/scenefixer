@@ -3,7 +3,7 @@ import { stripe, STRIPE_PRICES } from "@/lib/stripe";
 import { CREDIT_PACKS, EXACT_MAX_CREDITS, exactCreditPrice } from "@/lib/pricing";
 import { adminAuth, adminDb } from "@/lib/firebase-admin";
 import { packCredits, studioPack } from "@/lib/studio/catalog";
-import { canSell } from "@/lib/studio/server";
+import { batchState, canSell } from "@/lib/studio/server";
 
 async function getOrCreateCustomer(uid: string, email: string): Promise<string> {
   const userSnap = await adminDb.collection("users").doc(uid).get();
@@ -55,6 +55,9 @@ export async function POST(req: NextRequest) {
     if (!pack) return NextResponse.json({ error: "Invalid pack" }, { status: 400 });
     // Priced at the moment of checkout, so the launch bonus shown is the one granted.
     const credits = packCredits(pack);
+    if (pack.passDays && (await batchState()).passesLeft <= 0) {
+      return NextResponse.json({ error: "The Unlimited* passes for this batch are gone. Packs are still available.", code: "sold_out" }, { status: 409 });
+    }
     if (!(await canSell(credits.total))) {
       return NextResponse.json({ error: "This batch is sold out. Check back soon.", code: "sold_out" }, { status: 409 });
     }

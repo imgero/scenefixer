@@ -14,6 +14,8 @@ import {
   studioModel,
   type Aspect,
   type Resolution,
+  PASS_LIMIT,
+  passCovers,
 } from "@/lib/studio/catalog";
 
 /**
@@ -93,12 +95,12 @@ export async function runwayBalance(): Promise<number | null> {
 
 const ledgerRef = () => adminDb.collection("studio").doc("ledger");
 
-export type Batch = { open: boolean; videosLeft: number; fastOpen: boolean };
+export type Batch = { open: boolean; videosLeft: number; fastOpen: boolean; passesLeft: number };
 
 /** What is left to sell, in 5-second 720p Seedance videos. Fails closed: an unreadable balance sells nothing. */
 export async function batchState(): Promise<Batch & { unpromised: number | null }> {
   const [balance, ledger] = await Promise.all([runwayBalance(), ledgerRef().get()]);
-  if (balance === null) return { open: false, videosLeft: 0, fastOpen: false, unpromised: null };
+  if (balance === null) return { open: false, videosLeft: 0, fastOpen: false, passesLeft: 0, unpromised: null };
   const outstanding = (ledger.data()?.outstanding as number | undefined) ?? 0;
   const unpromised = balance - outstanding * RUNWAY_PER_STUDIO_CREDIT;
   const sellable = unpromised - SELL_RESERVE;
@@ -106,6 +108,7 @@ export async function batchState(): Promise<Batch & { unpromised: number | null 
     open: sellable >= CREDITS_PER_VIDEO * RUNWAY_PER_STUDIO_CREDIT,
     videosLeft: Math.max(0, Math.floor(sellable / (CREDITS_PER_VIDEO * RUNWAY_PER_STUDIO_CREDIT))),
     fastOpen: unpromised > FAST_FLOOR,
+    passesLeft: Math.max(0, PASS_LIMIT - ((ledger.data()?.passesSold as number | undefined) ?? 0)),
     unpromised,
   };
 }
@@ -135,7 +138,13 @@ export async function grantStudioPurchase(sessionId: string, uid: string, credit
     }
     tx.create(marker, { uid, credits, passDays, at: Date.now() });
     tx.set(userRef, update, { merge: true });
-    tx.set(ledgerRef(), { outstanding: FieldValue.increment(credits) }, { merge: true });
+    tx.set(
+      ledgerRef(),
+      passDays > 0
+        ? { outstanding: FieldValue.increment(credits), passesSold: FieldValue.increment(1) }
+        : { outstanding: FieldValue.increment(credits) },
+      { merge: true }
+    );
     return true;
   });
 }
@@ -258,7 +267,7 @@ async function release(jobId: string, status: StudioJob["status"], error: string
 
 export async function createStudioJob(uid: string, input: StudioInput): Promise<StudioJob> {
   const v = validate(input);
-  const passEligible = v.m.inPass;
+  const passEligible = passCovers(v.m, input.resolution, input.seconds);
   const batch = passEligible ? await batchState() : null;
 
   const userRef = adminDb.collection("users").doc(uid);

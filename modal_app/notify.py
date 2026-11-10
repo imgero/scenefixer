@@ -243,7 +243,8 @@ def user_scan_finished(
         lines = [
             "Scene Fixer checks that things match between shots: wardrobe, props, lighting, "
             "the room. Your video is one continuous shot, so there was no second shot to "
-            "compare it with.",
+            "compare it with (continuity checks work on videos with two or more shots cut "
+            "together).",
             "",
             "This scan didn't count toward your daily free scan. Upload the full sequence "
             "(two or more shots cut together) and we'll check every cut.",
