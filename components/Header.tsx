@@ -37,6 +37,20 @@ const PLAN_BADGE: Record<Plan, { label: string; className: string }> = {
   studio:  { label: "Studio",  className: "bg-purple-50 text-purple-700" },
 };
 
+/** What Scene Fixer makes. The header's Products menu and the mobile account menu list these. */
+const PRODUCTS = [
+  { name: "Continuity check", href: "/", blurb: "Find and fix continuity errors in AI videos.", isNew: false },
+  { name: "Studio", href: "/studio", blurb: "Make Seedance 2.5 videos with sound.", isNew: true },
+];
+
+function NewBadge() {
+  return (
+    <span className="text-[9px] font-semibold uppercase tracking-widest bg-emerald-100 text-emerald-700 rounded-full px-1.5 py-0.5">
+      New
+    </span>
+  );
+}
+
 function getInitials(email: string): string {
   if (!email) return "?";
   const local = email.split("@")[0];
@@ -55,6 +69,8 @@ export default function Header() {
   const [creditsBalance, setCreditsBalance] = useState(0);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const [productsOpen, setProductsOpen] = useState(false);
+  const productsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!user) { setPlan(null); setFixesUsed(0); setCreditsBalance(0); return; }
@@ -72,6 +88,8 @@ export default function Header() {
     const handler = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node))
         setDropdownOpen(false);
+      if (productsRef.current && !productsRef.current.contains(e.target as Node))
+        setProductsOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -109,24 +127,56 @@ export default function Header() {
             <span className="text-lg font-normal text-black leading-none tracking-tight">scene</span>
             <span className="text-lg font-bold text-black leading-none tracking-tight">fixer</span>
           </span>
-          <span className="text-[9px] font-semibold uppercase tracking-widest bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">Beta</span>
+          <span className="hidden sm:inline text-[9px] font-semibold uppercase tracking-widest bg-amber-100 text-amber-700 rounded-full px-2 py-0.5">Beta</span>
         </Link>
 
         {/* Center nav */}
         <nav className="hidden md:flex items-center gap-7 flex-1 justify-center">
+          <div className="relative" ref={productsRef}>
+            <button
+              onClick={() => setProductsOpen((o) => !o)}
+              aria-expanded={productsOpen}
+              className="flex items-center gap-1 text-sm text-gray-500 hover:text-black transition-colors"
+            >
+              Products
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className={`transition-transform ${productsOpen ? "rotate-180" : ""}`}>
+                <path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            {productsOpen && (
+              <div className="absolute left-1/2 -translate-x-1/2 top-8 w-72 bg-white border border-gray-200 rounded-2xl shadow-lg p-1.5 z-50">
+                {PRODUCTS.map((p) => (
+                  <Link
+                    key={p.href}
+                    href={p.href}
+                    onClick={() => setProductsOpen(false)}
+                    className="block rounded-xl px-3 py-2.5 hover:bg-gray-50 transition-colors"
+                  >
+                    <span className="flex items-center gap-2 text-sm font-medium text-black">
+                      {p.name}
+                      {p.isNew && <NewBadge />}
+                    </span>
+                    <span className="block text-xs text-gray-500 mt-0.5">{p.blurb}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
           <Link href="/how-it-works" className="text-sm text-gray-500 hover:text-black transition-colors">
             How it works
           </Link>
           <Link href="/pricing" className="text-sm text-gray-500 hover:text-black transition-colors">
             Pricing
           </Link>
-          <Link href="/studio" className="text-sm text-gray-500 hover:text-black transition-colors">
-            Seedance videos
-          </Link>
         </nav>
 
         {/* Right: user section */}
         <div className="flex items-center gap-3 shrink-0">
+          {/* Phones have no center nav; most visitors are on one. */}
+          <Link href="/studio" className="md:hidden flex items-center gap-1.5 text-sm text-gray-600 hover:text-black transition-colors">
+            Studio
+            <NewBadge />
+          </Link>
           {!loading && (
             user ? (
               <>
@@ -195,7 +245,7 @@ export default function Header() {
                 <button
                   onClick={handleSignIn}
                   disabled={signingIn}
-                  className="text-sm text-gray-600 hover:text-black transition-colors disabled:opacity-50 px-1"
+                  className="hidden sm:inline text-sm text-gray-600 hover:text-black transition-colors disabled:opacity-50 px-1"
                 >
                   Log in
                 </button>
