@@ -196,7 +196,7 @@ export default function Header() {
                     >
                       {badge.label}
                       <span className="opacity-60 font-normal">
-                        {empty ? "0 credits" : `${totalCredits}s`}
+                        {empty ? "0 fix credits" : `${totalCredits}s`}
                       </span>
                     </Link>
                   );
