@@ -827,3 +827,21 @@ async def reprocess_job(body: dict, _: None = Depends(_verify_token)):
             "errorMessage": str(e),
         })
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Saves finished Studio (Seedance) videos into our bucket every 10 minutes,
+# so a video is kept even if its owner closed the tab before it finished.
+# Runway's own links expire in 24-48 hours; the site copies a video when
+# something looks at it, and this is the something when nobody is looking.
+_sync_image = modal.Image.debian_slim(python_version="3.11").pip_install("requests>=2.31.0")
+
+
+@app.function(image=_sync_image, schedule=modal.Period(minutes=10), timeout=320, min_containers=0)
+def studio_sync():
+    import requests
+
+    try:
+        r = requests.get("https://scenefixer.com/api/studio/sync", timeout=300)
+        print(f"studio_sync: {r.status_code} {r.text[:200]}")
+    except Exception as exc:
+        print(f"studio_sync failed: {exc}")

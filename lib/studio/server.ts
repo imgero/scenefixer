@@ -487,3 +487,33 @@ export async function studioAccount(uid: string): Promise<StudioAccount> {
     fastLeftToday: passUntil ? Math.max(0, PASS_FAST_PER_DAY - used) : null,
   };
 }
+
+/**
+ * Settles and saves videos nobody is watching. A video is copied into our
+ * bucket when something looks at it (refreshStudioJob), and the page only
+ * looks while it is open: someone who started a Seedance video, closed the
+ * tab and came back after Runway's link expired (24-48 hours) would find it
+ * gone. A Modal schedule calls this every 10 minutes (modal_app/app.py
+ * studio_sync), so every finished video is saved within minutes either way.
+ * Idempotent; returns counts only.
+ */
+export async function syncStudioJobs(limit = 25): Promise<{ checked: number; saved: number; settled: number }> {
+  const since = Date.now() - 2 * DAY_MS;
+  const snap = await jobsCol().where("createdAt", ">", since).get();
+  const todo = snap.docs
+    .map((d) => ({ ...(d.data() as Omit<StudioJob, "id">), id: d.id }))
+    .filter((j) => !j.settled || (j.status === "SUCCEEDED" && !j.storagePath))
+    .slice(0, limit);
+  let saved = 0;
+  let settled = 0;
+  for (const j of todo) {
+    try {
+      const after = await refreshStudioJob(j);
+      if (!j.settled && after.settled) settled++;
+      if (!j.storagePath && after.storagePath) saved++;
+    } catch (err) {
+      console.error("[studio] sync failed", j.id, err instanceof Error ? err.message : err);
+    }
+  }
+  return { checked: todo.length, saved, settled };
+}

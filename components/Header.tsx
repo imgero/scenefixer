@@ -223,6 +223,13 @@ export default function Header() {
                       >
                         My fixed videos
                       </Link>
+                      <Link
+                        href="/studio"
+                        onClick={() => setDropdownOpen(false)}
+                        className="flex items-center px-3.5 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+                      >
+                        My Studio videos
+                      </Link>
                       <HelpLink
                         source="header_menu"
                         className="w-full flex items-center px-3.5 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
