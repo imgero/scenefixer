@@ -289,7 +289,7 @@ function PromoStrip() {
   const ends = new Date(LAUNCH_BONUS.until).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
   return (
     <div className="mt-8 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-900">
-      <b className="font-semibold">Launch week: +{LAUNCH_BONUS.pct}% free credits on every pack.</b> Ends {ends}
+      <b className="font-semibold">Beta bonus: +{LAUNCH_BONUS.pct}% free credits on every pack.</b> Ends {ends}
       {left && (
         <>
           {" · "}
