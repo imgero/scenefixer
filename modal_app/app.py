@@ -833,10 +833,9 @@ async def reprocess_job(body: dict, _: None = Depends(_verify_token)):
 # so a video is kept even if its owner closed the tab before it finished.
 # Runway's own links expire in 24-48 hours; the site copies a video when
 # something looks at it, and this is the something when nobody is looking.
-_sync_image = modal.Image.debian_slim(python_version="3.11").pip_install("requests>=2.31.0")
-
-
-@app.function(image=_sync_image, schedule=modal.Period(minutes=10), timeout=320, min_containers=0)
+# Runs on the app's own image: Modal imports the whole modal_app package to
+# start any function, so a slim image without it crashed on start (12 Nov).
+@app.function(image=image, schedule=modal.Period(minutes=10), timeout=320, min_containers=0)
 def studio_sync():
     import requests
 
