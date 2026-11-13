@@ -55,6 +55,28 @@ export default function RootLayout({
   return (
     <html lang="en" className={GeistSans.variable}>
       <head>
+        {/* Browser auto-translate (Chrome, Android) swaps our text nodes for
+            its own, and React then crashes with "insertBefore / removeChild:
+            not a child of this node" (a Polish visitor hit it on 12 Nov 2026).
+            The usual guard: skip the DOM call React makes on a node that
+            translation already moved, instead of throwing. See
+            github.com/facebook/react/issues/11538. */}
+        <Script id="translate-guard" strategy="beforeInteractive">
+          {`
+            if (typeof Node === 'function' && Node.prototype) {
+              var rc = Node.prototype.removeChild;
+              Node.prototype.removeChild = function (child) {
+                if (child.parentNode !== this) return child;
+                return rc.apply(this, arguments);
+              };
+              var ib = Node.prototype.insertBefore;
+              Node.prototype.insertBefore = function (node, ref) {
+                if (ref && ref.parentNode !== this) return node;
+                return ib.apply(this, arguments);
+              };
+            }
+          `}
+        </Script>
         <Script
           src="https://www.googletagmanager.com/gtag/js?id=G-M4J7FF60GN"
           strategy="afterInteractive"
