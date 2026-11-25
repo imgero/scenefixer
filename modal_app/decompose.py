@@ -77,7 +77,14 @@ def transcode_to_720p(input_path: str, output_path: str, crop: str | None = None
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", vf,
                 "-c:v", "libx264", "-crf", "23",
-                "-c:a", "aac",
+                # No audio. This copy only feeds shot detection and keyframes,
+                # which never listen. Re-encoding the audio here could only fail
+                # the job: a valid Samsung upload on 21 Nov 2026 switches its
+                # audio to a channel layout ffmpeg's resampler refuses
+                # ("LFE+LFE2") partway through, and the user was told their
+                # video was unreadable. fix.py and stitch.py read the original
+                # upload, so the final render keeps its audio.
+                "-an",
                 output_path,
             ],
             check=True,
@@ -522,7 +529,8 @@ def trim_video(input_path: str, output_path: str, seconds: float) -> str:
             "ffmpeg", "-y", "-i", input_path,
             "-t", f"{seconds:.3f}",
             "-c:v", "libx264", "-crf", "23",
-            "-c:a", "aac",
+            # No audio: this prefix only feeds analysis (see transcode_to_720p).
+            "-an",
             output_path,
         ],
         check=True,
