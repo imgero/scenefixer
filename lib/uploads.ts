@@ -18,3 +18,15 @@ export function isAbandonedUpload(
   const created = job.createdAt?.toMillis?.();
   return created !== undefined && now - created > UPLOAD_URL_TTL_MS;
 }
+
+/** One upload, however many clips it is made of. */
+export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+
+/**
+ * Most clips one job may join into a sequence. Several clips dropped together
+ * are uploaded separately and joined in order on Modal (modal_app/combine.py),
+ * each boundary a guaranteed cut. Also enforced there as MAX_CLIPS.
+ */
+export const MAX_CLIPS = 10;
+
+export const ACCEPTED_VIDEO_TYPES = ["video/mp4", "video/quicktime"];

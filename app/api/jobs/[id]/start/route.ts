@@ -37,7 +37,35 @@ export async function POST(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const { inputVideoUrl } = await req.json();
+    const body = await req.json();
+    let { inputVideoUrl } = body;
+
+    // A multi-clip upload sends every clip's URL, in order. Modal joins them
+    // and replaces inputVideoUrl with the joined file; until then it points at
+    // the first clip, so the status UI sees an upload that has landed. Only
+    // this job's own clip paths are accepted — the clips are fetched and
+    // stored as this job's original.
+    let inputClipUrls: string[] | undefined;
+    if (body.inputClipUrls !== undefined) {
+      const urls = body.inputClipUrls;
+      const ownPrefix = encodeURIComponent(`jobs/${jobId}/input/clips/`);
+      const expected = typeof jobData.inputClipCount === "number" ? jobData.inputClipCount : null;
+      const ok =
+        Array.isArray(urls) &&
+        urls.length >= 2 &&
+        (expected === null || urls.length === expected) &&
+        urls.every(
+          (u: unknown) =>
+            typeof u === "string" &&
+            u.startsWith("https://firebasestorage.googleapis.com/") &&
+            u.includes(`/o/${ownPrefix}`)
+        );
+      if (!ok) {
+        return NextResponse.json({ error: "inputClipUrls invalid" }, { status: 400 });
+      }
+      inputClipUrls = urls as string[];
+      inputVideoUrl = inputClipUrls[0];
+    }
 
     if (!inputVideoUrl) {
       return NextResponse.json({ error: "inputVideoUrl required" }, { status: 400 });
@@ -96,6 +124,7 @@ export async function POST(
 
     await adminDb.collection("jobs").doc(jobId).update({
       inputVideoUrl,
+      ...(inputClipUrls ? { inputClipUrls } : {}),
       status: "decomposing",
       // Modal compares its start time against this (queue_ms).
       analysisRequestedAt: Date.now(),
@@ -107,7 +136,7 @@ export async function POST(
     await captureServer({
       distinctId: uid!,
       event: "job_analysis_started",
-      properties: { job_id: jobId, is_beta: false },
+      properties: { job_id: jobId, is_beta: false, clip_count: inputClipUrls?.length ?? 1 },
     });
 
     // Use after() so Vercel keeps the background fetch alive after the

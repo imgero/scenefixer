@@ -357,7 +357,7 @@ def _peaks(scores, lo: float, hi: float, times: list[float]) -> list[int]:
     return sorted(kept)
 
 
-def detect_shots(video_path: str) -> list[dict]:
+def detect_shots(video_path: str, forced_cuts_ms: list[int] | None = None) -> list[dict]:
     """
     Return shot boundaries in ms, plus each shot's weak in-shot transitions.
 
@@ -366,6 +366,13 @@ def detect_shots(video_path: str) -> list[dict]:
 
     A peak at frame i marks i as the LAST frame of the old shot, so the new
     shot starts at frame i+1's timestamp.
+
+    `forced_cuts_ms` are where one uploaded clip ends and the next begins (see
+    combine.py). They are cuts whatever the network says: two generated clips
+    of one scene can look continuous enough to merge, and comparing them is
+    why they were uploaded together. A detected cut within _MIN_SHOT_S of one
+    is the same cut a frame or two off, and is dropped. Without forced cuts
+    the result is exactly what it was before they existed.
     """
     duration_ms = _duration_ms(video_path)
     scores = _transition_scores(video_path)
@@ -385,6 +392,25 @@ def detect_shots(video_path: str) -> list[dict]:
         if cut_s and t - cut_s[-1] < _MIN_SHOT_S:
             continue
         cut_s.append(t)
+
+    forced_s: list[float] = []
+    for ms in sorted(forced_cuts_ms or []):
+        t = ms / 1000.0
+        # Snap to a real frame start, so no shot begins between two frames.
+        if times:
+            t = min(times, key=lambda x: abs(x - t))
+        # Past a budget trim, or a sliver at either end, is not a shot.
+        if t < _MIN_SHOT_S or end_s - t < _MIN_SHOT_S:
+            continue
+        if forced_s and t <= forced_s[-1]:
+            continue
+        forced_s.append(t)
+    if forced_s:
+        cut_s = sorted(
+            forced_s
+            + [t for t in cut_s if all(abs(t - f) >= _MIN_SHOT_S for f in forced_s)]
+        )
+
     soft_s = [
         times[i + 1] if i + 1 < len(times) else end_s
         for i in _peaks(scores, _SOFT_CUT_THRESHOLD, _TRANSNET_THRESHOLD, times)
@@ -405,6 +431,7 @@ def detect_shots(video_path: str) -> list[dict]:
     print(
         f"detect_shots: {len(shots)} shots, "
         f"{sum(len(s['softCutsMs']) for s in shots)} weak in-shot transitions"
+        + (f", {len(forced_s)} clip boundaries" if forced_s else "")
     )
     return shots
 
@@ -540,6 +567,52 @@ def trim_video(input_path: str, output_path: str, seconds: float) -> str:
 
 
 
+def _combine_uploaded_clips(job_id: str, job: dict, tmp: str) -> tuple[str, list[int]]:
+    """Download a multi-clip job's clips, in order, and join them."""
+    from modal_app.combine import combine_clips
+
+    clip_dir = os.path.join(tmp, "clips")
+    os.makedirs(clip_dir, exist_ok=True)
+    paths = []
+    for i, url in enumerate(job["inputClipUrls"]):
+        d = os.path.join(clip_dir, f"{i:02d}")
+        os.makedirs(d, exist_ok=True)
+        paths.append(download_video(job_id, url, d))
+    joined, boundaries_ms = combine_clips(paths, clip_dir)
+
+    from modal_app import analytics
+    analytics.capture(
+        job_id,
+        "job_clips_combined",
+        {"clip_count": len(paths), "boundaries_ms": boundaries_ms,
+         "duration_s": round(_duration_ms(joined) / 1000.0, 2)},
+        job=job,
+    )
+    return joined, boundaries_ms
+
+
+def _upload_combined(job_id: str, job: dict, local_path: str) -> str:
+    """
+    Store the joined clips as the job's original and return its public URL.
+
+    Named after the first clip — "shot1 (+2 clips).mp4" — because the job
+    page's download name and My Jobs both show the last segment of this path.
+    """
+    from urllib.parse import quote
+
+    names = job.get("inputClipNames") or []
+    first = names[0] if names else "clips"
+    base = re.sub(r"\.[^./]+$", "", first).replace("/", "_") or "clips"
+    n_more = len(job.get("inputClipUrls") or []) - 1
+    storage_path = f"jobs/{job_id}/input/{base} (+{n_more} clip{'s' if n_more != 1 else ''}).mp4"
+    bucket = get_bucket()
+    bucket.blob(storage_path).upload_from_filename(local_path, content_type="video/mp4")
+    return (
+        f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/"
+        f"{quote(storage_path, safe='')}?alt=media"
+    )
+
+
 def run_decompose(job_id: str) -> int:
     """Full decompose phase. Returns number of shots found."""
     db = get_db()
@@ -547,8 +620,24 @@ def run_decompose(job_id: str) -> int:
     job = job_ref.get().to_dict()
 
     with tempfile.TemporaryDirectory() as tmp:
-        # 1. Download original
-        raw_path = download_video(job_id, job["inputVideoUrl"], tmp)
+        # 1. Download original — or, for a multi-clip upload, download the
+        # clips and join them into the original. See combine.py.
+        clip_urls = job.get("inputClipUrls") or []
+        if len(clip_urls) >= 2 and not job.get("clipsCombined"):
+            raw_path, boundaries_ms = _combine_uploaded_clips(job_id, job, tmp)
+            job["inputVideoUrl"] = _upload_combined(job_id, job, raw_path)
+            job["clipBoundariesMs"] = boundaries_ms
+            # inputVideoUrl now IS the joined file: fix.py, stitch.py, the
+            # before/after player and the download name read it from here on.
+            # clipsCombined makes a retried analysis reuse it, not rejoin.
+            job_ref.update({
+                "inputVideoUrl": job["inputVideoUrl"],
+                "clipBoundariesMs": boundaries_ms,
+                "clipsCombined": True,
+            })
+        else:
+            raw_path = download_video(job_id, job["inputVideoUrl"], tmp)
+        forced_cuts_ms = job.get("clipBoundariesMs") or []
 
         # 1b. Enforce video length limit per plan
         owner_uid = job.get("ownerUid")
@@ -628,7 +717,7 @@ def run_decompose(job_id: str) -> int:
         # Straight off norm_path. It is already the cropped, unpadded copy, so
         # the separate detection transcode this used to need — and its fallback
         # to a padded copy that hid cuts — are both gone.
-        shots = detect_shots(norm_path)
+        shots = detect_shots(norm_path, forced_cuts_ms=forced_cuts_ms)
 
         # 4. For each shot: extract 3 keyframes (25/50/75%), upload all,
         # write Firestore doc with array + mid-frame for backward-compat.
