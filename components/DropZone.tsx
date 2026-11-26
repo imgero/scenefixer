@@ -7,11 +7,17 @@ import { useAuth } from "@/lib/hooks/useAuth";
 import posthog from "posthog-js";
 import { signInWithGoogle } from "@/lib/signIn";
 import { HelpLink } from "@/components/HelpDialog";
-import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
+import { UPLOAD_URL_TTL_MS, MAX_CLIPS, MAX_UPLOAD_BYTES, ACCEPTED_VIDEO_TYPES } from "@/lib/uploads";
 import { exactCreditPrice, formatUsd } from "@/lib/pricing";
 
-const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
-const ACCEPTED = ["video/mp4", "video/quicktime"];
+const MAX_FILE_SIZE = MAX_UPLOAD_BYTES; // 200MB, for one video or all clips together
+const ACCEPTED = ACCEPTED_VIDEO_TYPES;
+
+// clip_2 before clip_10: the order people number their generations in.
+const byName = (a: File, b: File) =>
+  a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+
+const formatMb = (bytes: number) => `${Math.max(1, Math.round(bytes / 1024 / 1024))} MB`;
 
 export default function DropZone() {
   const router = useRouter();
@@ -31,7 +37,12 @@ export default function DropZone() {
   const busy = useRef(false);
   // Over the daily limit: the file they tried, and whether a credit can pay
   // for the scan now. Set from the refusal; cleared on the next attempt.
-  const [limitOffer, setLimitOffer] = useState<{ file: File; balance: number; credits: number } | null>(null);
+  const [limitOffer, setLimitOffer] = useState<{ files: File[]; balance: number; credits: number } | null>(null);
+  // Several clips dropped together, in the order they will be joined. Shown
+  // as a list to check and reorder before the scan starts: drag-and-drop order
+  // is arbitrary, and the order is the sequence that gets compared. A single
+  // dropped file never lands here — it uploads straight away, as it always has.
+  const [clips, setClips] = useState<File[]>([]);
   const [buying, setBuying] = useState(false);
   const [creditsAdded, setCreditsAdded] = useState<number | null>(null);
 
@@ -40,13 +51,13 @@ export default function DropZone() {
     const n = Number(new URLSearchParams(window.location.search).get("credits_added"));
     if (Number.isFinite(n) && n > 0) setCreditsAdded(n);
   }, []);
-  // The job a failed attempt created, kept so a retry of the same file
-  // uploads into it instead of abandoning it. See handleFile.
+  // The job a failed attempt created, kept so a retry of the same file (or
+  // the same set of clips) uploads into it instead of abandoning it. See
+  // handleFiles.
   const pendingUpload = useRef<{
     fileKey: string;
     jobId: string;
-    uploadUrl: string;
-    storagePath: string;
+    uploads: { uploadUrl: string; storagePath: string }[];
     issuedAt: number;
   } | null>(null);
 
@@ -63,18 +74,31 @@ export default function DropZone() {
     }
   };
 
-  const handleFile = useCallback(
-    async (file: File, opts: { extraScan?: boolean } = {}) => {
+  // One video, or 2+ clips that Modal joins in this order into one sequence
+  // (modal_app/combine.py). With one file every request is exactly what it
+  // was before clips existed.
+  const handleFiles = useCallback(
+    async (files: File[], opts: { extraScan?: boolean } = {}) => {
       setError(null);
       setLimitOffer(null);
 
-      if (!ACCEPTED.includes(file.type)) {
+      if (files.length === 0) return;
+      const multi = files.length > 1;
+      const file = files[0];
+      const totalBytes = files.reduce((n, f) => n + f.size, 0);
+
+      if (!files.every((f) => ACCEPTED.includes(f.type))) {
         setError("Only MP4 and MOV files are supported.");
         return;
       }
 
-      if (file.size > MAX_FILE_SIZE) {
-        setError("File must be under 200MB.");
+      if (multi && files.length > MAX_CLIPS) {
+        setError(`Up to ${MAX_CLIPS} clips at a time.`);
+        return;
+      }
+
+      if (totalBytes > MAX_FILE_SIZE) {
+        setError(multi ? "Clips must be under 200MB in total." : "File must be under 200MB.");
         return;
       }
 
@@ -101,23 +125,27 @@ export default function DropZone() {
         // Every retry used to create a fresh job and abandon the last one in
         // "uploading" for good: 31 of the 38 stuck jobs by 29 Sep were followed
         // by the same person trying again.
-        const fileKey = [file.name, file.size, file.lastModified, file.type, trimmedHint].join("|");
+        const fileKey = [
+          ...files.map((f) => [f.name, f.size, f.lastModified, f.type].join("|")),
+          trimmedHint,
+        ].join("|");
         const pending = pendingUpload.current;
-        let jobId: string, uploadUrl: string, storagePath: string;
+        let jobId: string, uploads: { uploadUrl: string; storagePath: string }[];
         if (
           pending &&
           pending.fileKey === fileKey &&
           // Leave the URL a margin to finish a large upload before it expires.
           Date.now() - pending.issuedAt < UPLOAD_URL_TTL_MS - 10 * 60 * 1000
         ) {
-          ({ jobId, uploadUrl, storagePath } = pending);
+          ({ jobId, uploads } = pending);
         } else {
           const res = await fetch("/api/jobs", {
             method: "POST",
             headers,
             body: JSON.stringify({
-              filename: file.name,
-              contentType: file.type,
+              ...(multi
+                ? { clips: files.map((f) => ({ filename: f.name, contentType: f.type, size: f.size })) }
+                : { filename: file.name, contentType: file.type }),
               userHint: trimmedHint || undefined,
               extraScan: opts.extraScan || undefined,
             }),
@@ -138,7 +166,7 @@ export default function DropZone() {
             if (data.code === "scan_limit" && data.error) {
               setError(data.error);
               setLimitOffer({
-                file,
+                files,
                 balance: typeof data.balance === "number" ? data.balance : 0,
                 credits: typeof data.extraScanCredits === "number" ? data.extraScanCredits : 1,
               });
@@ -150,8 +178,12 @@ export default function DropZone() {
             return;
           }
 
-          ({ jobId, uploadUrl, storagePath } = await res.json());
-          pendingUpload.current = { fileKey, jobId, uploadUrl, storagePath, issuedAt: Date.now() };
+          const created = await res.json();
+          jobId = created.jobId;
+          uploads = multi
+            ? created.uploads
+            : [{ uploadUrl: created.uploadUrl, storagePath: created.storagePath }];
+          pendingUpload.current = { fileKey, jobId, uploads, issuedAt: Date.now() };
         }
 
         // 2. PUT directly to the signed URL.
@@ -162,13 +194,14 @@ export default function DropZone() {
         // upload silently never landed. With no event on this step there was no
         // way to tell a network failure from an expired URL from a file the
         // browser could not read. Every outcome here is now reported.
-        setStage("Uploading…");
+        setStage(multi ? `Uploading ${files.length} clips…` : "Uploading…");
         const uploadStartedAt = Date.now();
-        const sizeMb = Math.round(file.size / 1024 / 1024);
+        const sizeMb = Math.round(totalBytes / 1024 / 1024);
         posthog.capture("upload_started", {
           job_id: jobId,
           file_size_mb: sizeMb,
           file_type: file.type,
+          ...(multi ? { clip_count: files.length } : {}),
         });
 
         const reportUploadFailure = (reason: string, extra: Record<string, unknown> = {}) => {
@@ -178,60 +211,76 @@ export default function DropZone() {
             file_size_mb: sizeMb,
             file_type: file.type,
             elapsed_ms: Date.now() - uploadStartedAt,
+            ...(multi ? { clip_count: files.length } : {}),
             ...extra,
           });
         };
 
-        await new Promise<void>((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open("PUT", uploadUrl, true);
-          xhr.setRequestHeader("Content-Type", file.type);
-          // Without a timeout a stalled PUT hangs forever: no progress, no
-          // error, no event, and a job left in "uploading" for good.
-          xhr.timeout = 15 * 60 * 1000;
-          let lastLoaded = 0;
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              lastLoaded = e.loaded;
-              setProgress(Math.round((e.loaded / e.total) * 100));
-            }
-          };
-          xhr.onload = () => {
-            if (xhr.status === 200) {
-              resolve();
-              return;
-            }
-            reportUploadFailure("http_status", {
-              http_status: xhr.status,
-              bytes_sent: lastLoaded,
-            });
-            reject(new Error(`Upload failed: ${xhr.status}`));
-          };
-          xhr.onerror = () => {
-            reportUploadFailure("network_error", { bytes_sent: lastLoaded });
-            reject(new Error("Upload network error"));
-          };
-          xhr.ontimeout = () => {
-            reportUploadFailure("timeout", { bytes_sent: lastLoaded });
-            reject(new Error("Upload timed out"));
-          };
-          xhr.onabort = () => {
-            reportUploadFailure("aborted", { bytes_sent: lastLoaded });
-            reject(new Error("Upload aborted"));
-          };
-          xhr.send(file);
-        });
+        // Clips go one after another, under one bar for all the bytes.
+        let bytesBefore = 0;
+        for (let i = 0; i < files.length; i++) {
+          const part = files[i];
+          const { uploadUrl } = uploads[i];
+          if (multi) setStage(`Uploading clip ${i + 1} of ${files.length}…`);
+          await new Promise<void>((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("PUT", uploadUrl, true);
+            xhr.setRequestHeader("Content-Type", part.type);
+            // Without a timeout a stalled PUT hangs forever: no progress, no
+            // error, no event, and a job left in "uploading" for good.
+            xhr.timeout = 15 * 60 * 1000;
+            let lastLoaded = 0;
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                lastLoaded = e.loaded;
+                setProgress(
+                  multi
+                    ? Math.round(((bytesBefore + e.loaded) / totalBytes) * 100)
+                    : Math.round((e.loaded / e.total) * 100)
+                );
+              }
+            };
+            xhr.onload = () => {
+              if (xhr.status === 200) {
+                resolve();
+                return;
+              }
+              reportUploadFailure("http_status", {
+                http_status: xhr.status,
+                bytes_sent: bytesBefore + lastLoaded,
+              });
+              reject(new Error(`Upload failed: ${xhr.status}`));
+            };
+            xhr.onerror = () => {
+              reportUploadFailure("network_error", { bytes_sent: bytesBefore + lastLoaded });
+              reject(new Error("Upload network error"));
+            };
+            xhr.ontimeout = () => {
+              reportUploadFailure("timeout", { bytes_sent: bytesBefore + lastLoaded });
+              reject(new Error("Upload timed out"));
+            };
+            xhr.onabort = () => {
+              reportUploadFailure("aborted", { bytes_sent: bytesBefore + lastLoaded });
+              reject(new Error("Upload aborted"));
+            };
+            xhr.send(part);
+          });
+          bytesBefore += part.size;
+        }
 
         setStage("Starting analysis…");
         posthog.capture("upload_completed", {
           job_id: jobId,
           file_size_mb: sizeMb,
           elapsed_ms: Date.now() - uploadStartedAt,
+          ...(multi ? { clip_count: files.length } : {}),
         });
 
-        const encodedPath = encodeURIComponent(storagePath);
         const bucket = process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET;
-        const inputVideoUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedPath}?alt=media`;
+        const urls = uploads.map(
+          (u) =>
+            `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(u.storagePath)}?alt=media`
+        );
 
         // 3. Start pipeline
         const startHeaders: Record<string, string> = { "Content-Type": "application/json" };
@@ -240,7 +289,7 @@ export default function DropZone() {
         const startRes = await fetch(`/api/jobs/${jobId}/start`, {
           method: "POST",
           headers: startHeaders,
-          body: JSON.stringify({ inputVideoUrl }),
+          body: JSON.stringify(multi ? { inputClipUrls: urls } : { inputVideoUrl: urls[0] }),
         });
         if (!startRes.ok) {
           const startData = await startRes.json().catch(() => ({}));
@@ -271,18 +320,24 @@ export default function DropZone() {
         // 4. Save to recent jobs in localStorage
         const recent = JSON.parse(localStorage.getItem("scenefixer_recent_jobs") || "[]");
         const updated = [
-          { id: jobId, filename: file.name, createdAt: Date.now() },
+          {
+            id: jobId,
+            filename: multi ? `${file.name} (+${files.length - 1} clips)` : file.name,
+            createdAt: Date.now(),
+          },
           ...recent,
         ].slice(0, 5);
         localStorage.setItem("scenefixer_recent_jobs", JSON.stringify(updated));
 
         posthog.capture("video_uploaded", {
           job_id: jobId,
-          file_size_mb: Math.round(file.size / 1024 / 1024),
+          file_size_mb: Math.round(totalBytes / 1024 / 1024),
           file_type: file.type,
           has_hint: !!trimmedHint,
+          ...(multi ? { clip_count: files.length } : {}),
         });
 
+        setClips([]);
         router.push(`/job/${jobId}`);
       } catch (err) {
         console.error(err);
@@ -328,23 +383,56 @@ export default function DropZone() {
     }
   };
 
+  // One file with nothing staged: straight to upload, as it always was.
+  // Anything else goes onto the clip list to be checked and ordered first.
+  const takeFiles = useCallback(
+    (list: FileList | null | undefined) => {
+      const picked = Array.from(list ?? []);
+      if (picked.length === 0) return;
+      if (picked.length === 1 && clips.length === 0) {
+        handleFiles(picked);
+        return;
+      }
+      setError(null);
+      setLimitOffer(null);
+      const videos = picked.filter((f) => ACCEPTED.includes(f.type));
+      if (videos.length < picked.length) setError("Only MP4 and MOV files are supported.");
+      const next = [...clips, ...videos.sort(byName)];
+      if (next.length > MAX_CLIPS) setError(`Up to ${MAX_CLIPS} clips at a time.`);
+      setClips(next.slice(0, MAX_CLIPS));
+      if (videos.length > 0) {
+        posthog.capture("clips_staged", { clip_count: Math.min(next.length, MAX_CLIPS) });
+      }
+    },
+    [clips, handleFiles]
+  );
+
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file) handleFile(file);
+      takeFiles(e.dataTransfer.files);
     },
-    [handleFile]
+    [takeFiles]
   );
 
   const onFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) handleFile(file);
+      takeFiles(e.target.files);
+      // So picking the same file again still fires a change.
+      e.target.value = "";
     },
-    [handleFile]
+    [takeFiles]
   );
+
+  const moveClip = (i: number, delta: -1 | 1) =>
+    setClips((cur) => {
+      const j = i + delta;
+      if (j < 0 || j >= cur.length) return cur;
+      const next = [...cur];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
 
   if (progress !== null) {
     // Before the first byte moves there is no percentage to show, so the bar
@@ -380,7 +468,7 @@ export default function DropZone() {
         <div className="rounded-2xl border-2 border-dashed border-gray-200 bg-white p-8 text-center">
           <div className="text-5xl mb-3">🎬</div>
           <p className="text-black font-semibold text-lg mb-1">Drop your video here</p>
-          <p className="text-gray-500 text-sm mb-5">MP4 or MOV · 2+ shots · 200MB max</p>
+          <p className="text-gray-500 text-sm mb-5">MP4 or MOV · one video, or several clips · 200MB max</p>
           <button
             onClick={handleSignIn}
             disabled={signingIn}
@@ -444,19 +532,109 @@ export default function DropZone() {
           ref={inputRef}
           type="file"
           accept="video/mp4,video/quicktime"
+          multiple
           className="hidden"
           onChange={onFileChange}
         />
         <div className="text-5xl mb-3">🎬</div>
         <p className="text-black font-semibold text-lg mb-1">
-          Drop your video here
+          {clips.length > 0 ? "Drop more clips here" : "Drop your video here"}
         </p>
-        <p className="text-gray-500 text-sm">MP4 or MOV · 2+ shots · 200MB max</p>
+        <p className="text-gray-500 text-sm">MP4 or MOV · one video, or several clips · 200MB max</p>
       </div>
+
+      {clips.length > 0 && (
+        <div className="rounded-2xl border border-gray-200 bg-white p-4">
+          <p className="text-sm font-semibold text-black mb-0.5">
+            {clips.length === 1 ? "1 clip" : `${clips.length} clips`}, joined in this order
+          </p>
+          <p className="text-xs text-gray-500 mb-3">
+            We compare them as one sequence, each clip its own shot. Check the order before you scan.
+          </p>
+          <ol className="flex flex-col gap-1.5 mb-3">
+            {clips.map((f, i) => (
+              <li
+                key={`${f.name}|${f.size}|${f.lastModified}|${i}`}
+                className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2 text-sm"
+              >
+                <span className="w-5 text-gray-400 tabular-nums text-xs">{i + 1}</span>
+                <span className="flex-1 truncate text-black" title={f.name}>{f.name}</span>
+                <span className="text-xs text-gray-400 tabular-nums">{formatMb(f.size)}</span>
+                <button
+                  type="button"
+                  onClick={() => moveClip(i, -1)}
+                  disabled={i === 0}
+                  aria-label={`Move ${f.name} up`}
+                  className="px-1.5 text-gray-500 hover:text-black disabled:opacity-25"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveClip(i, 1)}
+                  disabled={i === clips.length - 1}
+                  aria-label={`Move ${f.name} down`}
+                  className="px-1.5 text-gray-500 hover:text-black disabled:opacity-25"
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setClips((cur) => cur.filter((_, k) => k !== i))}
+                  aria-label={`Remove ${f.name}`}
+                  className="px-1.5 text-gray-400 hover:text-red-600"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ol>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-3 text-xs">
+              {clips.length < MAX_CLIPS && (
+                <button
+                  type="button"
+                  onClick={() => inputRef.current?.click()}
+                  className="font-semibold text-black underline underline-offset-2 hover:opacity-70"
+                >
+                  + Add clips
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setClips([]);
+                  setError(null);
+                }}
+                className="text-gray-500 hover:text-black"
+              >
+                Clear
+              </button>
+              <span
+                className={
+                  clips.reduce((n, f) => n + f.size, 0) > MAX_FILE_SIZE ? "text-red-600" : "text-gray-400"
+                }
+              >
+                {formatMb(clips.reduce((n, f) => n + f.size, 0))} of 200 MB
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                posthog.capture("clips_scan_clicked", { clip_count: clips.length });
+                handleFiles(clips);
+              }}
+              className="bg-black hover:bg-gray-800 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-colors"
+            >
+              {clips.length === 1 ? "Scan this video" : `Scan ${clips.length} clips as one sequence`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {creditsAdded && !error && (
         <p className="text-emerald-700 text-sm text-center">
-          {creditsAdded} credits added. Drop your video again to scan it.
+          {creditsAdded} credits added. Drop your video, or your clips, again to scan.
         </p>
       )}
 
@@ -470,7 +648,7 @@ export default function DropZone() {
           <button
             onClick={() => {
               posthog.capture("extra_scan_clicked", { credits: limitOffer.credits, balance: limitOffer.balance });
-              handleFile(limitOffer.file, { extraScan: true });
+              handleFiles(limitOffer.files, { extraScan: true });
             }}
             className="self-center bg-black hover:bg-gray-800 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-colors"
           >
@@ -488,7 +666,7 @@ export default function DropZone() {
       })()}
 
       <p className="text-center text-[11px] text-gray-500">
-        Works on videos with two or more shots. The free scan uses our standard AI
+        Works on a video with two or more shots, or several clips dropped together. The free scan uses our standard AI
         model (Claude Haiku), which can miss things; for our most advanced model
         (Claude Opus), run a deep scan with credits — 1 credit per shot.
       </p>

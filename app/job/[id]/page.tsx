@@ -654,6 +654,10 @@ export default function JobPage({ params }: Props) {
             only one shot there was nothing to compare, so this scan didn&apos;t count toward your daily
             free scan. Upload the full sequence, with two or more shots cut together.
           </p>
+          <p className="text-xs text-gray-700 mb-3">
+            Got the other clips? Drop them all at once and we&apos;ll join them in order and compare
+            them.
+          </p>
           <Link href="/" className="inline-block text-xs font-semibold text-black underline underline-offset-2 hover:opacity-70">
             Upload a sequence →
           </Link>

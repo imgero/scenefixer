@@ -5,7 +5,7 @@ import { createId } from "@paralleldrive/cuid2";
 import { FieldValue } from "firebase-admin/firestore";
 import { captureServer } from "@/lib/posthog-server";
 import { notifyOwner } from "@/lib/notify";
-import { UPLOAD_URL_TTL_MS } from "@/lib/uploads";
+import { UPLOAD_URL_TTL_MS, MAX_CLIPS, MAX_UPLOAD_BYTES, ACCEPTED_VIDEO_TYPES } from "@/lib/uploads";
 import { ensureEntitlement } from "@/lib/entitlements";
 import { dailyScanStatus, scanLimitMessage } from "@/lib/scanLimit";
 import { EXTRA_SCAN_CREDITS } from "@/lib/pricing";
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       email: userRecord?.email ?? null,
       emailVerified: userRecord?.emailVerified ?? false,
     });
-    const { filename, contentType, userHint, extraScan } = await req.json();
+    const { filename, contentType, userHint, extraScan, clips } = await req.json();
 
     // Over the limit, a scan can still be paid for with a credit. Nothing is
     // charged here: /start charges it, so an upload that never finishes costs
@@ -56,7 +56,39 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!filename || !contentType) {
+    // Several clips dropped together: each gets its own signed URL, and Modal
+    // joins them in this order into one video before analysis
+    // (modal_app/combine.py). Without `clips` this route is what it was.
+    type Clip = { filename: string; contentType: string; size: number };
+    let clipList: Clip[] | null = null;
+    if (clips !== undefined) {
+      const ok =
+        Array.isArray(clips) &&
+        clips.length >= 2 &&
+        clips.length <= MAX_CLIPS &&
+        clips.every(
+          (c: unknown): c is Clip =>
+            !!c &&
+            typeof (c as Clip).filename === "string" &&
+            (c as Clip).filename.length > 0 &&
+            ACCEPTED_VIDEO_TYPES.includes((c as Clip).contentType) &&
+            typeof (c as Clip).size === "number" &&
+            (c as Clip).size > 0
+        );
+      if (!ok) {
+        return NextResponse.json(
+          { error: `Drop between 2 and ${MAX_CLIPS} MP4 or MOV clips.`, code: "bad_clips" },
+          { status: 400 }
+        );
+      }
+      if (clips.reduce((n: number, c: Clip) => n + c.size, 0) > MAX_UPLOAD_BYTES) {
+        return NextResponse.json(
+          { error: "Clips must be under 200MB in total.", code: "too_large" },
+          { status: 400 }
+        );
+      }
+      clipList = clips as Clip[];
+    } else if (!filename || !contentType) {
       return NextResponse.json(
         { error: "filename and contentType required" },
         { status: 400 }
@@ -64,16 +96,32 @@ export async function POST(req: NextRequest) {
     }
 
     const jobId = createId();
-    const storagePath = `jobs/${jobId}/input/${filename}`;
     const bucket = adminStorage.bucket();
-    const file = bucket.file(storagePath);
+    const signUpload = async (path: string, type: string) => {
+      const [url] = await bucket.file(path).getSignedUrl({
+        version: "v4",
+        action: "write",
+        expires: Date.now() + UPLOAD_URL_TTL_MS,
+        contentType: type,
+      });
+      return url;
+    };
 
-    const [uploadUrl] = await file.getSignedUrl({
-      version: "v4",
-      action: "write",
-      expires: Date.now() + UPLOAD_URL_TTL_MS,
-      contentType,
-    });
+    let uploadUrl = "";
+    let storagePath = "";
+    let uploads: { uploadUrl: string; storagePath: string }[] | undefined;
+    if (clipList) {
+      uploads = await Promise.all(
+        clipList.map(async (c, i) => {
+          // The index keeps the order and two clips both named "output.mp4" apart.
+          const path = `jobs/${jobId}/input/clips/${String(i).padStart(2, "0")}_${c.filename.replace(/\//g, "_")}`;
+          return { uploadUrl: await signUpload(path, c.contentType), storagePath: path };
+        })
+      );
+    } else {
+      storagePath = `jobs/${jobId}/input/${filename}`;
+      uploadUrl = await signUpload(storagePath, contentType);
+    }
 
     const cleanedHint =
       typeof userHint === "string" ? userHint.trim().slice(0, 500) : "";
@@ -91,6 +139,9 @@ export async function POST(req: NextRequest) {
         fixedCount: 0,
         ...(cleanedHint ? { userHint: cleanedHint } : {}),
         ...(paidExtra ? { extraScanCredits: EXTRA_SCAN_CREDITS } : {}),
+        ...(clipList
+          ? { inputClipCount: clipList.length, inputClipNames: clipList.map((c) => c.filename) }
+          : {}),
         createdAt: FieldValue.serverTimestamp(),
       });
 
@@ -109,7 +160,8 @@ export async function POST(req: NextRequest) {
         properties: {
           job_id: jobId,
           has_hint: !!cleanedHint,
-          content_type: contentType,
+          content_type: clipList ? clipList[0].contentType : contentType,
+          clip_count: clipList ? clipList.length : 1,
           is_beta: false,
           paid_extra_scan: paidExtra,
         },
@@ -118,11 +170,11 @@ export async function POST(req: NextRequest) {
       const who = `Signed-in user (uid: ${uid})`;
       notifyOwner(
         "[Scene Fixer] New job — User",
-        `${who} created job ${jobId}.\n\nFile: ${filename}\nHint: ${cleanedHint || "(none)"}\nTime: ${new Date().toUTCString()}`
+        `${who} created job ${jobId}.\n\nFile: ${clipList ? `${clipList.length} clips: ${clipList.map((c) => c.filename).join(", ")}` : filename}\nHint: ${cleanedHint || "(none)"}\nTime: ${new Date().toUTCString()}`
       );
     });
 
-    return NextResponse.json({ jobId, uploadUrl, storagePath });
+    return NextResponse.json(uploads ? { jobId, uploads } : { jobId, uploadUrl, storagePath });
   } catch (err) {
     console.error("POST /api/jobs error:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

@@ -15,6 +15,18 @@ export type Job = {
   id: string;
   status: JobStatus;
   inputVideoUrl: string;
+  /**
+   * Multi-clip upload: the clips as uploaded, in order. Modal joins them
+   * (modal_app/combine.py) and then points inputVideoUrl at the joined file,
+   * which everything downstream reads. Absent on single-video jobs.
+   */
+  inputClipUrls?: string[];
+  inputClipCount?: number;
+  inputClipNames?: string[];
+  /** Set once the clips are joined, so a retried analysis does not rejoin. */
+  clipsCombined?: boolean;
+  /** Where each clip after the first starts in the joined file: always cuts. */
+  clipBoundariesMs?: number[];
   outputVideoUrl?: string;
   stitchVideoUrl?: string;
   outputQuality?: string;
